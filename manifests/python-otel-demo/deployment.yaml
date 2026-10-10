@@ -1,0 +1,189 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-a
+  namespace: <DEMO_NAMESPACE>
+spec:
+  replicas: 1
+  selector:
+    matchLabels: &id001
+      app.kubernetes.io/name: demo-a
+  template:
+    metadata:
+      labels: *id001
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: app
+        image: <DEMO_IMAGE>
+        ports:
+        - name: http
+          containerPort: 8080
+        env:
+        - name: OTEL_SERVICE_NAME
+          value: demo-a
+        - name: DEPLOYMENT_ENVIRONMENT
+          value: acceptance
+        - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+          value: https://otel-gateway.<TEMPO_NAMESPACE>.svc.cluster.local:4317
+        - name: OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE
+          value: /etc/otel/tls/ca.crt
+        - name: OTEL_EXPORTER_OTLP_TRACES_CLIENT_CERTIFICATE
+          value: /etc/otel/tls/tls.crt
+        - name: OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY
+          value: /etc/otel/tls/tls.key
+        - name: OTEL_EXPORTER_OTLP_TRACES_INSECURE
+          value: 'false'
+        - name: OTEL_PROPAGATORS
+          value: tracecontext,baggage
+        - name: DOWNSTREAM_URL
+          value: http://demo-b:8080/work
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 15
+        volumeMounts:
+        - name: tls
+          mountPath: /etc/otel/tls
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: tls
+        secret:
+          secretName: otel-client-tls
+      - name: tmp
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-a
+  namespace: <DEMO_NAMESPACE>
+spec:
+  selector:
+    app.kubernetes.io/name: demo-a
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-b
+  namespace: <DEMO_NAMESPACE>
+spec:
+  replicas: 1
+  selector:
+    matchLabels: &id001
+      app.kubernetes.io/name: demo-b
+  template:
+    metadata:
+      labels: *id001
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: app
+        image: <DEMO_IMAGE>
+        ports:
+        - name: http
+          containerPort: 8080
+        env:
+        - name: OTEL_SERVICE_NAME
+          value: demo-b
+        - name: DEPLOYMENT_ENVIRONMENT
+          value: acceptance
+        - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+          value: https://otel-gateway.<TEMPO_NAMESPACE>.svc.cluster.local:4317
+        - name: OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE
+          value: /etc/otel/tls/ca.crt
+        - name: OTEL_EXPORTER_OTLP_TRACES_CLIENT_CERTIFICATE
+          value: /etc/otel/tls/tls.crt
+        - name: OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY
+          value: /etc/otel/tls/tls.key
+        - name: OTEL_EXPORTER_OTLP_TRACES_INSECURE
+          value: 'false'
+        - name: OTEL_PROPAGATORS
+          value: tracecontext,baggage
+        - name: DOWNSTREAM_URL
+          value: http://demo-b:8080/work
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 15
+        volumeMounts:
+        - name: tls
+          mountPath: /etc/otel/tls
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: tls
+        secret:
+          secretName: otel-client-tls
+      - name: tmp
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-b
+  namespace: <DEMO_NAMESPACE>
+spec:
+  selector:
+    app.kubernetes.io/name: demo-b
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http

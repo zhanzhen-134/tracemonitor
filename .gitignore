@@ -1,0 +1,9 @@
+.cache/
+build/
+environment.local.json
+*.local.yaml
+*.env
+*.key
+*.pem
+__pycache__/
+.venv/

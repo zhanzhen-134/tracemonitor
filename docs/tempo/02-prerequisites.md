@@ -1,0 +1,44 @@
+# 前置条件、参数与兼容性
+
+以下现网信息尚未提供，不能视为已验证。将非敏感值填写到 `environment.local.json`，该文件及 `build/` 已被 Git 忽略。
+
+| 参数/信息 | 约束与确认方法 |
+|---|---|
+| 当前 kubeconfig、TEMPO_NAMESPACE | 使用 kubectl/Helm 当前 context，无需设置 context 参数；namespace 显式指定，建议专用 namespace |
+| K8s 版本、CNI、metrics-server | Chart 声明 >=1.25；仍需服务端 dry-run、NetworkPolicy 实际阻断测试和 HPA 指标测试 |
+| STORAGE_CLASS | 支持 RWO、跨节点重挂载；跨区 PVC 不会自动变成异地副本；核验 reclaimPolicy/扩容 |
+| ZONE_A / ZONE_B | 真实且不同的 topology.kubernetes.io/zone 标签；节点资源足够，至少两故障域 |
+| Kafka 版本、broker 数、磁盘 | 至少 3 broker 才能使用 RF=3；固定平台 CLI 版本；与 Tempo 3.1.0 联调 |
+| KAFKA_BOOTSTRAP / TOPIC | bootstrap 为 host:port；网络须覆盖全部 advertised.listeners；独立 Topic |
+| KAFKA_SASL_MECHANISM | PLAIN、SCRAM-SHA-256、SCRAM-SHA-512；默认启用 TLS；凭据不写 JSON |
+| KAFKA_CIDR / PORT | 实际 broker 地址范围与端口；多网段应增加 NetworkPolicy 条目，不能随意放行 0.0.0.0/0 |
+| MINIO_ENDPOINT / BUCKET | endpoint 不含 https://，含端口；独立 bucket；TLS SAN 与主机名匹配 |
+| MINIO_CIDR / PORT | 核验经 Service DNAT 后 CNI 策略匹配；必要时改 namespaceSelector + podSelector |
+| PROMETHEUS_REMOTE_WRITE_URL | 完整 http(s)://host:port/api/v1/write；确认 receiver 开启及认证要求 |
+| PROMETHEUS_RELEASE | ServiceMonitor / PrometheusRule 标签必须匹配现有 selector，不能猜 release 名 |
+| MONITORING_NAMESPACE、GRAFANA_NAMESPACE | 现有实例所在命名空间；本例网络策略按 namespace 放行 |
+| Grafana/ES/Prometheus 版本与 UID | 记录准确版本；确认日志数据源支持关联、exemplar 能力和索引 time field |
+| DEMO_NAMESPACE / DEMO_IMAGE | 受控验收 namespace 与已推送的固定版本镜像；不自动部署示例 |
+| 已有 OTel Gateway | 如可复用，使用 GATEWAY_MODE=reuse；合并 traces pipeline，不替换其其他 pipeline |
+| 证书/Secret | tempo-credentials、tempo-ca、otel-gateway-tls；CA/客户端证书生命周期和轮换负责人 |
+| SLO/RPO/RTO/吞吐 | 明确写入成功率、近期查询可用性、长期查询延迟和故障恢复预算 |
+
+现有 Prometheus 必须选择目标 namespace 中的 ServiceMonitor/PrometheusRule。namespaceSelector 选择的是对象所在 namespace，ServiceMonitor.spec.namespaceSelector 选择的是被监控 Service，两个不能混淆。
+
+权限：Tempo 与 Collector 不需要 Kubernetes 读写权限，SA token 不挂载，不授予 ClusterRole。rollout-operator 是例外，它需要工作负载及 webhook 权限；审阅 `build/tempo-rendered.yaml` 中的 Role/ClusterRole/Binding、CRD、Mutating/ValidatingWebhookConfiguration。已有兼容 rollout-operator 时，设置 `rollout_operator.enabled=false` 与 `liveStore.zoneAwareReplication.rolloutOperatorManagedExternally=true`，确认 CRD 和 webhook 覆盖当前 namespace。不能仅设开关就假定兼容。
+
+环境中未安装 helm/kubectl 时，运维机安装审核过的固定版本。仓库本地验证使用 Helm 3.19.0、PyYAML 6.0.3。运行脚本要求 Bash、Python、kubectl、helm、curl；Windows 可用 Git Bash/WSL，离线渲染可直接用 PowerShell + Python。
+
+## 官方版本与字段来源
+
+- [Tempo 3.1.0 release](https://github.com/grafana/tempo/releases/tag/v3.1.0)：固定发行版。
+- [Tempo 3.1 release notes](https://grafana.com/docs/tempo/latest/release-notes/v3-1/)：Kafka SASL/TLS 能力。
+- [Chart 3.11.1 发布](https://github.com/grafana-community/helm-charts/releases/tag/tempo-distributed-3.11.1)：本地 tgz 为校验基准，values 从此包验证。
+- [Tempo v3.1.0 配置源](https://github.com/grafana/tempo/blob/v3.1.0/docs/sources/tempo/configuration/_index.md)：structuredConfig 字段来源。
+- [Tempo Operator v0.22.0](https://github.com/grafana/tempo-operator/releases/tag/v0.22.0)：Components 为 Tempo 2.10.8，故不用于本项目。
+- [Kafka 配置](https://grafana.com/docs/tempo/latest/set-up-for-tracing/setup-tempo/configure-kafka/)；[Partition ring](https://grafana.com/docs/tempo/latest/reference-tempo-architecture/partition-ring/)。
+- [Collector v0.135.0](https://github.com/open-telemetry/opentelemetry-collector-contrib/releases/tag/v0.135.0)；[内部遥测](https://opentelemetry.io/docs/collector/internal-telemetry/)；[队列与韧性](https://opentelemetry.io/docs/collector/resiliency/)。
+- [Prometheus Operator API](https://prometheus-operator.dev/docs/api-reference/api/)；[Prometheus receiver](https://prometheus.io/docs/prometheus/latest/querying/api/#remote-write-receiver)。
+- [Grafana Trace to logs](https://grafana.com/docs/grafana/latest/datasources/tempo/configure-tempo-data-source/configure-trace-to-logs/)；[Elasticsearch 数据源](https://grafana.com/docs/grafana/latest/datasources/elasticsearch/configure/)。
+
+latest 文档可能继续变化；升级必须重新对照固定 tag 源码与发布说明，不能将本次版本矩阵自动沿用。

@@ -1,0 +1,216 @@
+fullnameOverride: tempo
+reportingEnabled: false
+global:
+  storageClass: <STORAGE_CLASS>
+  extraArgs:
+  - -config.expand-env=true
+  extraEnvFrom:
+  - secretRef:
+      name: tempo-credentials
+defaults:
+  extraVolumes:
+  - name: ca
+    secret:
+      secretName: tempo-ca
+  extraVolumeMounts:
+  - name: ca
+    mountPath: /etc/tempo/ca
+    readOnly: true
+  podSecurityContext:
+    seccompProfile:
+      type: RuntimeDefault
+tempo:
+  image:
+    tag: 3.1.0
+  useHeadlessGoverningService: true
+  startupProbe:
+    httpGet:
+      path: /ready
+      port: http-metrics
+    periodSeconds: 10
+    failureThreshold: 180
+  structuredConfig:
+    ingest:
+      kafka:
+        sasl_mechanism: <KAFKA_SASL_MECHANISM>
+        sasl_username: ${KAFKA_USERNAME}
+        sasl_password: ${KAFKA_PASSWORD}
+        tls_enabled: true
+        tls_ca_path: /etc/tempo/ca/kafka-ca.crt
+    multitenancy_enabled: false
+serviceAccount:
+  create: true
+  automountServiceAccountToken: false
+ingest:
+  kafka:
+    address: <KAFKA_BOOTSTRAP>
+    topic: <KAFKA_TOPIC>
+    auto_create_topic_enabled: false
+    auto_create_topic_default_partitions: 3
+traces:
+  otlp:
+    grpc:
+      enabled: true
+storage:
+  trace:
+    backend: s3
+    s3:
+      endpoint: <MINIO_ENDPOINT>
+      bucket: <MINIO_BUCKET>
+      access_key: ${MINIO_ACCESS_KEY}
+      secret_key: ${MINIO_SECRET_KEY}
+      insecure: false
+      forcepathstyle: true
+      tls_ca_path: /etc/tempo/ca/minio-ca.crt
+metricsGenerator:
+  enabled: true
+  kind: StatefulSet
+  replicas: 2
+  persistence:
+    enabled: true
+    size: 20Gi
+  config:
+    storage:
+      remote_write_add_org_id_header: false
+      remote_write:
+      - url: <PROMETHEUS_REMOTE_WRITE_URL>
+        send_exemplars: true
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: '2'
+      memory: 2Gi
+  maxUnavailable: 1
+  podDisruptionBudget:
+    enabled: true
+backendScheduler:
+  enabled: true
+  persistence:
+    enabled: true
+    size: 10Gi
+  config:
+    provider:
+      compaction:
+        compaction:
+          block_retention: 720h
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: '1'
+      memory: 1Gi
+backendWorker:
+  replicas: 2
+  resources:
+    requests:
+      cpu: 500m
+      memory: 2Gi
+    limits:
+      cpu: '2'
+      memory: 4Gi
+  maxUnavailable: 1
+  podDisruptionBudget:
+    enabled: true
+blockBuilder:
+  replicas: 3
+  config:
+    partitions_per_instance: 1
+  resources:
+    requests:
+      cpu: '1'
+      memory: 2Gi
+    limits:
+      cpu: '4'
+      memory: 4Gi
+  maxUnavailable: 1
+  podDisruptionBudget:
+    enabled: true
+liveStore:
+  replicas: 3
+  persistence:
+    enabled: true
+    size: 30Gi
+  config:
+    readiness_target_lag: 5s
+  zoneAwareReplication:
+    enabled: true
+    topologyKey: topology.kubernetes.io/zone
+    maxUnavailable: 1
+    noDownscale: true
+    zones:
+    - name: zone-a
+      nodeSelector:
+        topology.kubernetes.io/zone: <ZONE_A>
+    - name: zone-b
+      nodeSelector:
+        topology.kubernetes.io/zone: <ZONE_B>
+  resources:
+    requests:
+      cpu: '1'
+      memory: 4Gi
+    limits:
+      cpu: '4'
+      memory: 8Gi
+  maxUnavailable: 1
+  podDisruptionBudget:
+    enabled: true
+distributor:
+  replicas: 3
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: '2'
+      memory: 2Gi
+  maxUnavailable: 1
+  podDisruptionBudget:
+    enabled: true
+querier:
+  replicas: 2
+  resources:
+    requests:
+      cpu: '1'
+      memory: 2Gi
+    limits:
+      cpu: '4'
+      memory: 4Gi
+  maxUnavailable: 1
+  podDisruptionBudget:
+    enabled: true
+queryFrontend:
+  replicas: 2
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: '1'
+      memory: 1Gi
+  maxUnavailable: 1
+  podDisruptionBudget:
+    enabled: true
+rollout_operator:
+  enabled: true
+  image:
+    tag: v0.40.0
+memcached:
+  enabled: false
+cache:
+  caches: []
+gateway:
+  enabled: false
+overrides:
+  defaults:
+    metrics_generator:
+      processors:
+      - span-metrics
+      - service-graphs
+metaMonitoring:
+  serviceMonitor:
+    enabled: true
+    labels:
+      release: <PROMETHEUS_RELEASE>

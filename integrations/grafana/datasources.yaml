@@ -1,0 +1,29 @@
+apiVersion: 1
+datasources:
+- name: Tempo
+  uid: tempo
+  type: tempo
+  access: proxy
+  url: http://tempo-query-frontend.<TEMPO_NAMESPACE>.svc.cluster.local:3200
+  jsonData:
+    httpMethod: GET
+    serviceMap:
+      datasourceUid: <PROMETHEUS_UID>
+    nodeGraph:
+      enabled: true
+    tracesToMetrics:
+      datasourceUid: <PROMETHEUS_UID>
+      spanStartTimeShift: -5m
+      spanEndTimeShift: 5m
+      tags:
+      - key: service.name
+        value: service
+      queries:
+      - name: Request rate
+        query: sum(rate(traces_spanmetrics_calls_total{$$__tags}[5m]))
+    tracesToLogsV2:
+      datasourceUid: <ELASTICSEARCH_UID>
+      spanStartTimeShift: -5m
+      spanEndTimeShift: 5m
+      customQuery: true
+      query: trace_id:"$${__span.traceId}"

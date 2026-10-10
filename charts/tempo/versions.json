@@ -1,0 +1,10 @@
+{
+  "checked_at": "2026-10-10",
+  "chart": "3.11.1",
+  "tempo": "3.1.0",
+  "collector": "0.135.0",
+  "rollout_operator_chart": "0.52.0",
+  "rollout_operator_image": "v0.40.0",
+  "sha256": "6e02759562a012706c26d5c862380cbce2db6281124476d81884518f03b41038",
+  "source": "https://grafana-community.github.io/helm-charts"
+}

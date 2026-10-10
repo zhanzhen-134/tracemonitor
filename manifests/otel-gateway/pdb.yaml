@@ -1,0 +1,11 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: otel-gateway
+  namespace: <TEMPO_NAMESPACE>
+  labels: &id001
+    app.kubernetes.io/name: otel-gateway
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels: *id001

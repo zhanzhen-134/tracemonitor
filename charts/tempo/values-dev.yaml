@@ -1,0 +1,22 @@
+distributor:
+  replicas: 1
+liveStore:
+  replicas: 1
+  zoneAwareReplication:
+    enabled: false
+    noDownscale: false
+blockBuilder:
+  replicas: 1
+backendWorker:
+  replicas: 1
+querier:
+  replicas: 1
+queryFrontend:
+  replicas: 1
+metricsGenerator:
+  replicas: 1
+rollout_operator:
+  enabled: false
+ingest:
+  kafka:
+    auto_create_topic_default_partitions: 1

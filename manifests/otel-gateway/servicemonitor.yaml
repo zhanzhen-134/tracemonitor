@@ -1,0 +1,17 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: otel-gateway
+  namespace: <TEMPO_NAMESPACE>
+  labels:
+    release: <PROMETHEUS_RELEASE>
+spec:
+  namespaceSelector:
+    matchNames:
+    - <TEMPO_NAMESPACE>
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: otel-gateway
+  endpoints:
+  - port: metrics
+    interval: 30s

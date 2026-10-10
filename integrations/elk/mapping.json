@@ -1,0 +1,27 @@
+{
+  "properties": {
+    "trace_id": {
+      "type": "keyword"
+    },
+    "span_id": {
+      "type": "keyword"
+    },
+    "service": {
+      "properties": {
+        "name": {
+          "type": "keyword"
+        }
+      }
+    },
+    "deployment": {
+      "properties": {
+        "environment": {
+          "type": "keyword"
+        }
+      }
+    },
+    "@timestamp": {
+      "type": "date"
+    }
+  }
+}

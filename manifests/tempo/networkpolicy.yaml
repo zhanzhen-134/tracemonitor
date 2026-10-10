@@ -1,0 +1,95 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tempo
+  namespace: <TEMPO_NAMESPACE>
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: tempo
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - &id001
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: tempo
+    ports:
+    - protocol: TCP
+      port: 9095
+    - protocol: TCP
+      port: 3200
+    - protocol: TCP
+      port: 7946
+    - protocol: UDP
+      port: 7946
+  - from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: otel-gateway
+    ports:
+    - protocol: TCP
+      port: 4317
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: <MONITORING_NAMESPACE>
+    ports:
+    - protocol: TCP
+      port: 3200
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: <GRAFANA_NAMESPACE>
+    ports:
+    - protocol: TCP
+      port: 3200
+  - from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: rollout-operator
+    ports:
+    - protocol: TCP
+      port: 3200
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  - to:
+    - *id001
+    ports:
+    - protocol: TCP
+      port: 9095
+    - protocol: TCP
+      port: 3200
+    - protocol: TCP
+      port: 7946
+    - protocol: UDP
+      port: 7946
+  - to:
+    - ipBlock:
+        cidr: <KAFKA_CIDR>
+    ports:
+    - protocol: TCP
+      port: <KAFKA_PORT>
+  - to:
+    - ipBlock:
+        cidr: <MINIO_CIDR>
+    ports:
+    - protocol: TCP
+      port: <MINIO_PORT>
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: <MONITORING_NAMESPACE>
+    ports:
+    - protocol: TCP
+      port: <PROMETHEUS_PORT>
