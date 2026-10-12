@@ -7,3 +7,4 @@ environment.local.json
 *.pem
 __pycache__/
 .venv/
+work/

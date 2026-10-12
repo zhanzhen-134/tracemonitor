@@ -20,7 +20,7 @@
 
 开发配置修复了继承生产 noDownscale 的冲突；必须同时关闭 zoneAwareReplication 和 noDownscale。Chart 自身 lint 没有把该模板 fail 视作失败，因此交付流程始终同时执行 template，不能只依赖 lint。
 
-示例 SDK 测试使用内存 exporter 和本机 HTTP 服务，不依赖 Tempo，并不证明完整生产链路。Python 依赖安装/测试运行在本机 Windows Python 3.14；交付容器基于 Linux Python 3.12，Docker 构建及该运行时验证尚未执行。
+示例 SDK 测试使用内存 exporter 和本机 HTTP 服务，不依赖 Tempo，并不证明完整生产链路。Python 依赖安装/测试运行在本机 Windows Python 3.14。目标运行版本为 Python 3.10.12：全部 Python 代码（含交互式脚本中的内联片段）已按 3.10 语法解析通过，未使用 3.11+ 标准库 API；`requirements.lock` 与 `scripts/tempo/requirements.txt` 的全部固定版本已用 `pip download --python-version 3.10` 确认存在 cp310 安装包。交付容器基于 `python:3.10.12-slim-bookworm`，Docker 构建及该运行时下的实际执行尚未进行。
 
 ## 尚待目标环境执行
 
@@ -34,4 +34,4 @@
 
 以上验证使用 `.cache/smoke.json` 中的虚构示例地址生成本地 `build/`。为避免将测试渲染当作实际部署，最终移除了 build/render-mode.txt 成功标记；填写真实 environment.local.json 并重新 render 才能执行安装脚本。
 
-复验入口：`python scripts/tempo/render.py environment.local.json` → `python scripts/tempo/check_rendered.py`。SDK 复验先安装 `examples/python-otel-demo/requirements.lock`，再执行 `python scripts/python-otel-demo/verify_sdk.py`。部署与验收顺序见 04、06，上线批准清单见 11。
+复验入口：`python3 scripts/tempo/render.py environment.local.json` → `python3 scripts/tempo/check_rendered.py`。SDK 复验先安装 `examples/python-otel-demo/requirements.lock`，再执行 `python3 scripts/python-otel-demo/verify_sdk.py`。部署与验收顺序见 04、06，上线批准清单见 11。

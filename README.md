@@ -9,13 +9,15 @@
 - `integrations/`：现有 Grafana、Prometheus、ELK 的增量配置，不部署这些平台。
 - `docs/tempo/`：架构、前置条件、容量、部署、集成、验收与运维。
 
-先阅读 [前置条件](docs/tempo/02-prerequisites.md)，按 [安装手册](docs/tempo/04-installation.md) 实施；也可以运行交互式脚本 `bash scripts/tempo/interactive-install.sh`，它会按手册顺序执行到 Grafana 中能看到 Service Graph 为止。
+先阅读 [前置条件](docs/tempo/02-prerequisites.md)，按 [安装手册](docs/tempo/04-installation.md) 实施；也可以运行交互式脚本 `bash scripts/tempo/interactive-install.sh`，它会按手册顺序执行到 Grafana 中能看到 Service Graph 为止。完全不使用脚本时，按 [纯手工安装手册](docs/tempo/04b-manual-installation.md) 操作，只需要 kubectl、helm 等标准命令。
 
 ```bash
-python -m pip install -r scripts/tempo/requirements.txt
+# Python 3.10.12；Ubuntu 22.04 需先 apt-get install python3-pip python3-venv，详见安装手册第 1.1 步
+python3 -m venv .venv && source .venv/bin/activate
+python3 -m pip install -r scripts/tempo/requirements.txt
 cp environment.example.json environment.local.json
 # 填入非敏感环境参数；密码通过 Secret 提供
-python scripts/tempo/render.py environment.local.json
+python3 scripts/tempo/render.py environment.local.json
 export TEMPO_NAMESPACE='<与参数文件一致>'
 bash scripts/tempo/preflight-check.sh
 ```

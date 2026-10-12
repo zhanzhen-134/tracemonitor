@@ -2,11 +2,14 @@
 
 本手册按顺序执行即可完成：Kafka/MinIO 准备 → Tempo 部署 → Collector 接入 → Prometheus 派生指标 → Grafana 数据源 → Java 业务自动注入 → 在 Grafana 查看 Trace 与 Service Graph → ES 日志关联。每一步都给出命令、预期结果和失败时的排查方向，**上一步预期结果未达成时不要进入下一步**。
 
+不想使用任何仓库脚本、希望每一步都手工执行时，改看 [纯手工安装手册](04b-manual-installation.md)：它只使用清单文件、Chart 包和 kubectl / helm 等标准命令，也不需要 Python。
+
 ## 交互式安装脚本
 
 第 1～13 步可以用交互式脚本按顺序执行：
 
 ```bash
+source .venv/bin/activate        # 先按第 1.1 步准备 Python 3.10.12 虚拟环境
 bash scripts/tempo/interactive-install.sh
 ```
 
@@ -93,15 +96,46 @@ kubectl -n monitoring get prometheus -o jsonpath='{.items[0].spec.serviceMonitor
 
 | 工具 | 要求 | 检查命令 |
 |---|---|---|
-| kubectl | 与集群版本相差不超过一个小版本 | `kubectl version` |
+| bash | 4.0+（交互式脚本用到关联数组） | `bash --version` |
+| kubectl | 与集群版本相差不超过一个小版本 | `kubectl version --client` |
 | helm | 3.x，仓库验证版本 3.19.0 | `helm version` |
-| python | 3.9+ | `python --version` |
-| curl | 任意 | `curl --version` |
+| python3 | **3.10.12**（Ubuntu 22.04 自带版本），最低 3.10；需要 PyYAML 6.0.3 | `python3 --version` |
+| curl、openssl、base64、diff | 任意版本；用于调用 API、生成证书、解码 Secret、对比渲染结果 | `openssl version` |
 | docker / 企业构建流水线 | 仅在使用附录 B 示例应用时需要 | `docker version` |
 
+### 1.1 准备 Python 3.10.12 环境
+
+文中命令统一写作 `python3`。仓库脚本会自动按 `python3` → `python` 的顺序查找 3.10 及以上版本，也可以用环境变量 `PYTHON=/path/to/python3` 指定解释器。
+
+**Ubuntu 22.04**（自带 3.10.12，但默认没有 pip 和 venv）：
+
 ```bash
-python -m pip install -r scripts/tempo/requirements.txt
+python3 --version                                   # 应输出 Python 3.10.12
+sudo apt-get update && sudo apt-get install -y python3-pip python3-venv
 ```
+
+**推荐使用虚拟环境**，不污染系统 Python：
+
+```bash
+python3 -m venv .venv                               # 在仓库根目录创建，.venv/ 已被 Git 忽略
+source .venv/bin/activate                           # 之后本终端中的 python3 即为虚拟环境
+python3 -m pip install -r scripts/tempo/requirements.txt
+python3 -c 'import sys, yaml; print(sys.version.split()[0], yaml.__version__)'
+```
+
+**预期**：输出 `3.10.12 6.0.3`。
+
+- 每次新开终端执行安装步骤前，都要先 `source .venv/bin/activate`。交互式脚本也要在激活后的终端中运行。
+- 不使用虚拟环境时，执行 `python3 -m pip install --user -r scripts/tempo/requirements.txt`。
+- 运维机无法访问 PyPI 时，在能联网的机器上执行 `python3 -m pip download --python-version 3.10 --only-binary=:all: -r scripts/tempo/requirements.txt -d wheels/`，把 `wheels/` 拷到运维机后执行 `python3 -m pip install --no-index --find-links wheels/ -r scripts/tempo/requirements.txt`。
+- 使用 Windows Git Bash 时，命令中的 `python3` 改为 `python`，并确认 `python --version` 为 3.10 及以上。
+
+| 失败现象 | 处理 |
+|---|---|
+| `No module named pip` | Ubuntu 上安装 `python3-pip`，或使用上面的虚拟环境 |
+| `ensurepip is not available` | 安装 `python3-venv` |
+| `No module named yaml` | 当前终端没有激活虚拟环境，或 PyYAML 装到了其他解释器；用 `which python3` 确认 |
+| 脚本报 `Python 3.10+ is required` | 系统 Python 低于 3.10，设置 `PYTHON=` 指向 3.10.12 解释器 |
 
 ## 2. 收集并填写环境参数
 
@@ -187,7 +221,7 @@ curl -s -u "$GRAFANA_ADMIN_USER:$GRAFANA_ADMIN_PASSWORD" "$GRAFANA_URL/api/healt
 
 ```bash
 curl -s -u "$GRAFANA_ADMIN_USER:$GRAFANA_ADMIN_PASSWORD" "$GRAFANA_URL/api/datasources" \
-  | python -c 'import json,sys; [print(d["uid"], d["type"], d["name"], d["url"]) for d in json.load(sys.stdin)]'
+  | python3 -c 'import json,sys; [print(d["uid"], d["type"], d["name"], d["url"]) for d in json.load(sys.stdin)]'
 ```
 
 - `type` 为 `prometheus`、URL 指向 2.1 中那个 Prometheus Service 的一行，其 uid 作为 `PROMETHEUS_UID`。
@@ -202,7 +236,7 @@ helm repo add grafana-community https://grafana-community.github.io/helm-charts
 helm repo update grafana-community
 helm search repo grafana-community/tempo-distributed --versions
 helm show chart charts/tempo/tempo-distributed-3.11.1.tgz
-python scripts/tempo/render.py environment.local.json
+python3 scripts/tempo/render.py environment.local.json
 ```
 
 **预期**：最后输出 `Rendered N workloads to .../build; no cluster changes made`。
@@ -598,7 +632,7 @@ mx rm -rf /tmp/.mc /tmp/tempo-policy.json /tmp/probe.txt
 
 ### 5.10 回到第 3 步重新渲染
 
-Kafka、MinIO 参数确定后，执行 `python scripts/tempo/render.py environment.local.json`，再继续第 6 步。
+Kafka、MinIO 参数确定后，执行 `python3 scripts/tempo/render.py environment.local.json`，再继续第 6 步。
 
 ## 6. 准备 Namespace、证书与 Secret
 
@@ -654,7 +688,7 @@ kubectl -n "$TEMPO_NAMESPACE" get secret tempo-credentials tempo-ca otel-gateway
 **预期**：三个 Secret 均存在。`tempo-credentials` 应包含 4 个 key：`KAFKA_USERNAME`、`KAFKA_PASSWORD`、`MINIO_ACCESS_KEY`、`MINIO_SECRET_KEY`。可以用下面的命令确认：
 
 ```bash
-kubectl -n "$TEMPO_NAMESPACE" get secret tempo-credentials -o jsonpath='{.data}' | python -c 'import json,sys; print(sorted(json.load(sys.stdin)))'
+kubectl -n "$TEMPO_NAMESPACE" get secret tempo-credentials -o jsonpath='{.data}' | python3 -c 'import json,sys; print(sorted(json.load(sys.stdin)))'
 ```
 
 说明：
@@ -725,7 +759,7 @@ Service Graph 和 span metrics 是 Tempo metrics-generator 通过 Remote Write �
 kubectl -n "$MONITORING_NAMESPACE" port-forward "svc/$PROMETHEUS_SVC" 9090:9090
 
 # 另一个终端
-curl -s http://127.0.0.1:9090/api/v1/status/flags | python -c \
+curl -s http://127.0.0.1:9090/api/v1/status/flags | python3 -c \
   'import json,sys; print(json.load(sys.stdin)["data"].get("web.enable-remote-write-receiver"))'
 ```
 
@@ -1129,7 +1163,7 @@ Java agent 已经把 `trace_id`、`span_id` 放进了 Logback / Log4j2 的 MDC�
 
 ```bash
 es "$ES_URL/_cat/indices/<业务日志索引前缀>*?v&s=index:desc" | head -5
-es "$ES_URL/_index_template" | python -c 'import json,sys; [print(t["name"], t["index_template"]["index_patterns"]) for t in json.load(sys.stdin)["index_templates"]]'
+es "$ES_URL/_index_template" | python3 -c 'import json,sys; [print(t["name"], t["index_template"]["index_patterns"]) for t in json.load(sys.stdin)["index_templates"]]'
 export ES_TEMPLATE='<index_patterns 能匹配业务日志索引的模板名>'
 ```
 
@@ -1162,7 +1196,7 @@ es -X PUT "$ES_URL/_ingest/pipeline/trace-id-extract" -d '{
 
 ```bash
 es "$ES_URL/_index_template/$ES_TEMPLATE" > build/es-template-before.json      # 备份，回退时使用
-python - "$ES_TEMPLATE" <<'EOF' > build/es-template-after.json
+python3 - "$ES_TEMPLATE" <<'EOF' > build/es-template-after.json
 import json, sys
 t = json.load(open('build/es-template-before.json'))['index_templates'][0]['index_template']
 t.setdefault('composed_of', [])
@@ -1190,7 +1224,7 @@ template 只对新建的索引生效。可以等下一次自动 rollover / 按�
 es -X POST "$ES_URL/<data stream 或写别名>/_rollover"
 ```
 
-回退方法：`es -X PUT "$ES_URL/_index_template/$ES_TEMPLATE" -d "$(python -c 'import json; print(json.dumps(json.load(open("build/es-template-before.json"))["index_templates"][0]["index_template"]))')"`。
+回退方法：`es -X PUT "$ES_URL/_index_template/$ES_TEMPLATE" -d "$(python3 -c 'import json; print(json.dumps(json.load(open("build/es-template-before.json"))["index_templates"][0]["index_template"]))')"`。
 
 ### 14.4 在 ES 数据源中配置跳转回 Tempo
 
@@ -1233,7 +1267,7 @@ Grafana → Connections → Data sources → Elasticsearch → Data links → Ad
 不接入示例应用时可以跳过本附录。示例使用 mTLS 端口（4317），用来在没有业务流量的环境中验证 mTLS 接入。
 
 1. 构建并推送镜像：`docker build -t <REGISTRY>/python-otel-demo:1.0.0 examples/python-otel-demo`，然后 push。
-2. 在 `environment.local.json` 中填写 `DEMO_NAMESPACE`、`DEMO_IMAGE`，重新执行 `python scripts/tempo/render.py environment.local.json`。
+2. 在 `environment.local.json` 中填写 `DEMO_NAMESPACE`、`DEMO_IMAGE`，重新执行 `python3 scripts/tempo/render.py environment.local.json`。
 3. 准备 namespace 和客户端证书：
 
    ```bash

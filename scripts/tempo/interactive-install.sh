@@ -115,9 +115,11 @@ s_tools() {
     command -v "$t" >/dev/null || die "缺少命令：$t"
   done
   for t in python3 python; do
-    if command -v "$t" >/dev/null && "$t" -c 'import sys; sys.exit(sys.version_info < (3,9))' 2>/dev/null; then PY=$t; break; fi
+    if command -v "$t" >/dev/null && "$t" -c 'import sys; sys.exit(sys.version_info < (3,10))' 2>/dev/null; then PY=$t; break; fi
   done
-  [[ -n "$PY" ]] || die "需要 Python 3.9+"
+  [[ -n "$PY" ]] || die "需要 Python 3.10+（验证版本 3.10.12）"
+  info "使用 $("$PY" --version 2>&1 | tr -d '\r')"
+  export PYTHON=$PY   # used by scripts/tempo/common.sh
   if ! "$PY" -c 'import yaml' 2>/dev/null; then
     confirm "未安装 PyYAML，现在执行 pip install -r scripts/tempo/requirements.txt？" || die "需要 PyYAML"
     run "$PY" -m pip install -r scripts/tempo/requirements.txt

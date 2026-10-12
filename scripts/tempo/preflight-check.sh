@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 source "$(dirname -- "$0")/common.sh"
 check_bundle
-for tool in kubectl helm python; do command -v "$tool" >/dev/null; done
+for tool in kubectl helm; do command -v "$tool" >/dev/null; done
+"$PYTHON" --version
 k version
 k get nodes -L topology.kubernetes.io/zone
 k get storageclass

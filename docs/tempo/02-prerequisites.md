@@ -29,7 +29,7 @@
 
 权限：Tempo 与 Collector 不需要 Kubernetes 读写权限，SA token 不挂载，不授予 ClusterRole。rollout-operator 是例外，它需要工作负载及 webhook 权限；审阅 `build/tempo-rendered.yaml` 中的 Role/ClusterRole/Binding、CRD、Mutating/ValidatingWebhookConfiguration。已有兼容 rollout-operator 时，设置 `rollout_operator.enabled=false` 与 `liveStore.zoneAwareReplication.rolloutOperatorManagedExternally=true`，确认 CRD 和 webhook 覆盖当前 namespace。不能仅设开关就假定兼容。
 
-环境中未安装 helm/kubectl 时，运维机安装审核过的固定版本。仓库本地验证使用 Helm 3.19.0、PyYAML 6.0.3。运行脚本要求 Bash、Python、kubectl、helm、curl；Windows 可用 Git Bash/WSL，离线渲染可直接用 PowerShell + Python。
+环境中未安装 helm/kubectl 时，运维机安装审核过的固定版本。仓库本地验证使用 Helm 3.19.0、Python 3.10.12、PyYAML 6.0.3；示例应用镜像基于 `python:3.10.12-slim-bookworm`，`requirements.lock` 中的依赖均已确认提供 Python 3.10 的安装包。运行脚本要求 Bash、Python、kubectl、helm、curl；Windows 可用 Git Bash/WSL，离线渲染可直接用 PowerShell + Python。
 
 ## 官方版本与字段来源
 
