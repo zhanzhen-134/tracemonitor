@@ -7,7 +7,7 @@
 | 当前 kubeconfig、TEMPO_NAMESPACE | 使用 kubectl/Helm 当前 context，无需设置 context 参数；namespace 显式指定，建议专用 namespace |
 | K8s 版本、CNI、metrics-server | Chart 声明 >=1.25；仍需服务端 dry-run、NetworkPolicy 实际阻断测试和 HPA 指标测试 |
 | STORAGE_CLASS | 支持 RWO、跨节点重挂载；跨区 PVC 不会自动变成异地副本；核验 reclaimPolicy/扩容 |
-| ZONE_A / ZONE_B | 真实且不同的 topology.kubernetes.io/zone 标签；节点资源足够，至少两故障域 |
+| ZONE_A / ZONE_B | 可选。都留空为单可用区模式（默认，节点不需要 zone 标签，live-store 3 个，不装 rollout-operator）；都填写时为双可用区模式，必须是真实且不同的 topology.kubernetes.io/zone 标签，由 `charts/tempo/values-multi-zone.yaml` 开启跨区复制 |
 | Kafka 版本、broker 数、磁盘 | 至少 3 broker 才能使用 RF=3；固定平台 CLI 版本；与 Tempo 3.1.0 联调 |
 | KAFKA_BOOTSTRAP / TOPIC | bootstrap 为 host:port；网络须覆盖全部 advertised.listeners；独立 Topic |
 | KAFKA_SASL_MECHANISM | PLAIN、SCRAM-SHA-256、SCRAM-SHA-512；默认启用 TLS；凭据不写 JSON |
@@ -27,7 +27,7 @@
 
 现有 Prometheus 必须选择目标 namespace 中的 ServiceMonitor/PrometheusRule。namespaceSelector 选择的是对象所在 namespace，ServiceMonitor.spec.namespaceSelector 选择的是被监控 Service，两个不能混淆。
 
-权限：Tempo 与 Collector 不需要 Kubernetes 读写权限，SA token 不挂载，不授予 ClusterRole。rollout-operator 是例外，它需要工作负载及 webhook 权限；审阅 `build/tempo-rendered.yaml` 中的 Role/ClusterRole/Binding、CRD、Mutating/ValidatingWebhookConfiguration。已有兼容 rollout-operator 时，设置 `rollout_operator.enabled=false` 与 `liveStore.zoneAwareReplication.rolloutOperatorManagedExternally=true`，确认 CRD 和 webhook 覆盖当前 namespace。不能仅设开关就假定兼容。
+权限：Tempo 与 Collector 不需要 Kubernetes 读写权限，SA token 不挂载，不授予 ClusterRole。双可用区模式下的 rollout-operator 是例外，它需要工作负载及 webhook 权限；审阅 `build/tempo-rendered.yaml` 中的 Role/ClusterRole/Binding、CRD、Mutating/ValidatingWebhookConfiguration。已有兼容 rollout-operator 时，设置 `rollout_operator.enabled=false` 与 `liveStore.zoneAwareReplication.rolloutOperatorManagedExternally=true`，确认 CRD 和 webhook 覆盖当前 namespace。不能仅设开关就假定兼容。
 
 环境中未安装 helm/kubectl 时，运维机安装审核过的固定版本。仓库本地验证使用 Helm 3.19.0、Python 3.10.12、PyYAML 6.0.3；示例应用镜像基于 `python:3.10.12-slim-bookworm`，`requirements.lock` 中的依赖均已确认提供 Python 3.10 的安装包。运行脚本要求 Bash、Python、kubectl、helm、curl；Windows 可用 Git Bash/WSL，离线渲染可直接用 PowerShell + Python。
 

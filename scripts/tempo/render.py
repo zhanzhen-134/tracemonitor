@@ -23,6 +23,14 @@ def substitute(value, env):
         return TOKEN.sub(lambda m: str(env[m[1]]), value)
     return value
 
+def merge(base, overlay):
+    for k, v in overlay.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            merge(base[k], v)
+        else:
+            base[k] = v
+    return base
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('environment', type=Path)
@@ -42,14 +50,21 @@ def main():
     # The demo is optional: leave DEMO_NAMESPACE and DEMO_IMAGE empty to skip rendering it.
     demo_keys = ['DEMO_NAMESPACE', 'DEMO_IMAGE']
     skip_demo = all(not str(env.get(k, '')).strip() for k in demo_keys)
-    if any('<' in str(v) or not str(v).strip() for k, v in env.items() if not (skip_demo and k in demo_keys)):
+    # Zones are optional: both empty = single-zone; both set = zone-aware live-store + rollout-operator.
+    zone_keys = ['ZONE_A', 'ZONE_B']
+    zones_set = [bool(str(env.get(k, '')).strip()) for k in zone_keys]
+    if any(zones_set) and not all(zones_set):
+        raise SystemExit('Set both ZONE_A and ZONE_B for multi-zone, or leave both empty for single-zone')
+    multi_zone = all(zones_set)
+    optional = (demo_keys if skip_demo else []) + ([] if multi_zone else zone_keys)
+    if any('<' in str(v) or not str(v).strip() for k, v in env.items() if k not in optional):
         raise SystemExit('Replace all environment placeholders before rendering')
     if not re.fullmatch(r'[a-z0-9]([-a-z0-9]*[a-z0-9])?', env['TEMPO_NAMESPACE']):
         raise SystemExit('Invalid Kubernetes namespace')
     if env['KAFKA_SASL_MECHANISM'] not in ['PLAIN', 'SCRAM-SHA-256', 'SCRAM-SHA-512']:
         raise SystemExit('Select supported PLAIN or SCRAM mechanism; TLS remains enabled')
-    if env['ZONE_A'] == env['ZONE_B'] and not args.dev:
-        raise SystemExit('Production requires two distinct availability zones')
+    if multi_zone and env['ZONE_A'] == env['ZONE_B']:
+        raise SystemExit('ZONE_A and ZONE_B must be different availability zones')
     for key in ['KAFKA_PORT','MINIO_PORT','PROMETHEUS_PORT']:
         if not isinstance(env[key], int) or not 0 < env[key] < 65536:
             raise SystemExit(f'{key} must be an integer port')
@@ -65,6 +80,9 @@ def main():
         if skip_demo and demo_dir in path.parents:
             continue
         docs = [substitute(d, env) for d in yaml.safe_load_all(path.read_text(encoding='utf-8'))]
+        if multi_zone and path.name == 'values-production.yaml':
+            overlay = yaml.safe_load((ROOT/'charts/tempo/values-multi-zone.yaml').read_text(encoding='utf-8'))
+            docs = [merge(docs[0], substitute(overlay, env))]
         target = out/path.relative_to(ROOT)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(yaml.safe_dump_all(docs, sort_keys=False, allow_unicode=True), encoding='utf-8')
@@ -95,7 +113,8 @@ def main():
             if c['image'].endswith(':latest') or ':' not in c['image']:
                 raise SystemExit(f'Unpinned image: {c["image"]}')
     (out/'render-mode.txt').write_text('dev' if args.dev else 'production')
-    print(f'Rendered {len(workloads)} workloads to {out}; no cluster changes made')
+    (out/'zone-mode.txt').write_text('multi' if multi_zone else 'single')
+    print(f'Rendered {len(workloads)} workloads ({"multi" if multi_zone else "single"}-zone) to {out}; no cluster changes made')
 
 if __name__ == '__main__':
     main()

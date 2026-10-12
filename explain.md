@@ -1,6 +1,6 @@
 # 安装对现有业务、Kafka、MinIO 的影响说明
 
-本文说明按 [安装手册](docs/tempo/04-installation.md) 或 [交互式脚本](scripts/tempo/interactive-install.sh) 安装时，对现有系统做了哪些改动、为什么要改、会有什么影响，以及如何回退。
+本文说明按 [安装手册](docs/tempo/04-installation.md)、[纯手工安装手册](docs/tempo/04b-manual-installation.md) 或 [交互式脚本](scripts/tempo/interactive-install.sh) 安装时，对现有系统做了哪些改动、为什么要改、会有什么影响，以及如何回退。第 5 节说明仓库中每个脚本具体做了什么。
 
 结论：
 
@@ -100,7 +100,7 @@ Kafka 在这里是 Tempo **内部的缓冲队列**：distributor 收到数据先
 |---|---|---|
 | 新建 Topic `tempo-traces` | 3 分区、3 副本、`min.insync.replicas=2`、保留 24 小时、`cleanup.policy=delete`、单条消息上限 16MB（只对该 Topic 生效） | Tempo 专用的数据通道 |
 | 新建用户 `tempo` | SCRAM-SHA-512，随机生成密码 | Tempo 使用独立账号，可以单独吊销 |
-| ACL（Kafka 已开启授权时） | `tempo` 只能读写 `tempo-traces`，只能使用 4 个固定的消费组：`block-builder`、`metrics-generator`、`tempo-live-store-zone-a`、`tempo-live-store-zone-b` | 最小权限，**看不到任何业务 Topic** |
+| ACL（Kafka 已开启授权时） | `tempo` 只能读写 `tempo-traces`，只能使用固定的消费组：`block-builder`、`metrics-generator`、`tempo-live-store`（双可用区模式为 `tempo-live-store-zone-a`、`tempo-live-store-zone-b`） | 最小权限，**看不到任何业务 Topic** |
 | （可选）broker 默认参数 | `message.max.bytes`、`replica.fetch.max.bytes` 调到 16000000 | 只在非 Strimzi 方式下、而且你确认后才执行，见 2.4 |
 
 Strimzi 管理的 Kafka 通过 `KafkaTopic`、`KafkaUser` 资源创建，由 Strimzi 统一管理，不直接用命令行修改。
@@ -178,3 +178,106 @@ Kafka 只保留 24 小时，live-store 只保存近期数据。block-builder 会
 | Prometheus | 在 Tempo namespace 中新增 ServiceMonitor 和 PrometheusRule | 新增对 Tempo 组件的抓取和告警，不改已有规则 |
 | Grafana | 新增 UID 为 `tempo` 的数据源（sidecar 方式会新增一个 ConfigMap） | 不修改已有数据源。sidecar 以 initContainer 方式运行时会重启一次 Grafana |
 | Elasticsearch（手工第 14 步，脚本不做） | 新增 component template、ingest pipeline，并挂到业务日志的 index template 上 | 只对 rollover 之后的新索引生效；ingest 时多一次 grok 解析。操作前会先备份原 template，可以回退 |
+
+---
+
+## 5. 仓库中的脚本分别做了什么
+
+使用 [纯手工安装手册](docs/tempo/04b-manual-installation.md) 时不会用到下面任何脚本；使用 [安装手册](docs/tempo/04-installation.md) 或交互式脚本时会用到。
+
+脚本分为两类：只在本机准备文件（不碰集群），以及对集群执行 kubectl / helm 命令。**会修改 Kafka、MinIO、Prometheus、Grafana 或业务服务的，只有 `interactive-install.sh`。** 其余脚本要么只改 Tempo 自己的 namespace，要么只读。
+
+### 5.1 只在本机运行，不影响集群
+
+**[render.py](scripts/tempo/render.py)：填写配置文件**
+
+1. 读取 `environment.local.json` 并校验：
+   - 占位符都已填写；
+   - namespace 格式正确；
+   - Kafka 认证机制为 PLAIN 或 SCRAM；
+   - ZONE_A / ZONE_B 要么都留空（单可用区），要么都填写且不同（双可用区）；
+   - 端口为整数；
+   - 对照 `environment.example.json`，缺少参数时会直接列出。
+2. 把 `charts/tempo/values-production.yaml`（双可用区模式下再合并 `values-multi-zone.yaml`）、`manifests/`、`integrations/` 中的 `<TEMPO_NAMESPACE>` 这类占位符替换为实际值，结果写到 `build/`，**不修改原文件**。DEMO_* 留空时跳过示例应用。
+3. 校验 Chart 包的 SHA256，必须与 `versions.json` 一致。
+4. 执行 `helm lint` 和 `helm template`，渲染结果保存到 `build/tempo-rendered.yaml`。
+5. 检查渲染结果：8 个 Tempo 组件齐全，不包含旧组件（ingester / compactor），镜像没有使用 `latest` 标签。
+
+纯手工安装手册第 5 步用 `sed` 完成的就是这件事。
+
+**[check_rendered.py](scripts/tempo/check_rendered.py)：额外的离线检查（只读）**
+
+检查渲染结果：
+
+- Tempo 配置：对象存储为 S3、关闭了 Kafka Topic 自动创建、启用了 Service Graph 处理器。
+- 工作负载：每个 Tempo 容器都挂载了凭据 Secret 和 CA，并设置了资源限制和探针。
+- Service：每个 Service 都能选中工作负载。
+- NetworkPolicy：端口都是整数。
+- 副本数：与生产 / 开发模式一致。
+
+**[verify_sdk.py](scripts/python-otel-demo/verify_sdk.py)：Python 示例应用的冒烟测试**
+
+用内存 exporter 在本机运行示例应用，验证 HTTP 上下文传播、错误 span、日志中的 trace_id。不连接任何服务器。
+
+### 5.2 对集群执行操作
+
+**[common.sh](scripts/tempo/common.sh)：其他脚本共用，自身不执行任何操作**
+
+- 要求设置 `TEMPO_NAMESPACE`，并查找 Python 3.10 及以上版本的解释器。
+- 每次执行前检查 `build/`：必须是生产模式的渲染结果，没有未替换的占位符，namespace 与 `TEMPO_NAMESPACE` 一致。这样可以避免装到错误的 namespace。
+
+**[preflight-check.sh](scripts/tempo/preflight-check.sh)：只读检查**
+
+列出节点可用区和 StorageClass，检查 Prometheus Operator 的 CRD 是否存在，用 `kubectl auth can-i` 检查权限。**不做任何修改。**
+
+**[install.sh](scripts/tempo/install.sh)：安装 Tempo，只在 Tempo namespace 内操作**
+
+1. 要求设置 `CHANGE_APPROVAL_ID` 和 `GATEWAY_MODE`。
+2. 检查 namespace 和 3 个 Secret 是否存在（不会创建它们）。
+3. 应用 Tempo 的 NetworkPolicy（先做服务端 dry-run）。
+4. 执行 `helm upgrade --install tempo`，最长等待 20 分钟。双可用区模式下这一步会同时安装 rollout-operator 及其 CRD 和 webhook，这是它唯一新增的集群级资源；单可用区模式不安装。
+5. 应用 PrometheusRule 告警规则。
+6. `GATEWAY_MODE=new` 时应用 otel-gateway 的清单，并等待其就绪。
+
+**不涉及 Kafka、MinIO、Prometheus、Grafana 和业务服务。**
+
+**[validate.sh](scripts/tempo/validate.sh)：只读验证**
+
+显示 release 和 Pod 状态，等待 Tempo 的 Pod 就绪，然后通过 query-frontend 查询指定的 TRACE_ID，确认能返回 span。结果保存到 `build/trace-recent.json`。
+
+**[rollback.sh](scripts/tempo/rollback.sh)：回滚 Tempo 的 Helm release**
+
+执行 `helm rollback tempo <REVISION>`，执行前要求确认数据格式兼容。只回滚 Helm 管理的资源；Kafka、MinIO、CRD 和 gateway 不会恢复。
+
+**[scripts/kafka/create-topic.sh](scripts/kafka/create-topic.sh)、[grant-acls.sh](scripts/kafka/grant-acls.sh)：修改 Kafka**
+
+在本机使用 Kafka CLI 执行：
+
+- 创建 `tempo-traces` Topic（3 分区、3 副本、保留 24 小时）；
+- 授予 Tempo 用户对该 Topic 的读写权限，以及对 4 个消费组的读取权限。
+
+新版安装手册和交互式脚本已经不再使用这两个脚本，改为用 `kubectl exec` 在 broker Pod 内执行同样的命令。
+
+### 5.3 [interactive-install.sh](scripts/tempo/interactive-install.sh)：串起整个流程
+
+它把安装手册的第 1～13 步串起来执行：复用 render.py、preflight-check.sh 和 install.sh，其余步骤由它自己完成。每一步都可以跳过；修改共享平台之前会先请你确认。
+
+| 步骤 | 做了什么 | 改动了什么 |
+|---|---|---|
+| 1 工具 | 检查所需工具是否存在，并请你确认当前集群就是目标集群 | 无 |
+| 2 参数 | 读取 Prometheus CR、helm list、Service、节点和 StorageClass，给出候选项 | 无 |
+| 5a Kafka | Strimzi：创建 `KafkaTopic` + `KafkaUser`。其他部署方式：在 broker Pod 内用 CLI 创建用户、Topic 和 ACL，并可选调大 broker 默认消息大小 | **Kafka**（只新增 Tempo 资源；broker 参数在你确认后才修改） |
+| 5b MinIO | 从 Pod 配置读取 root 账号并取得 CA；用 `mc` 创建 bucket、策略和 `tempo` 用户；做一次写入 / 读取 / 删除测试 | **MinIO**（只新增资源） |
+| 2.2 Grafana | 建立端口转发，读取已有数据源的 UID | 无 |
+| 3 渲染 | 写入 `environment.local.json` → 调用 render.py → Kafka / MinIO 未启用 TLS 时修改渲染后的 values | 只有本机文件 |
+| 4 预检 | 调用 preflight-check.sh | 无 |
+| 6 Secret | 创建 namespace；用 openssl 生成 gateway 的 CA 和证书；创建 3 个 Secret | Tempo namespace |
+| 7 安装 | 调用 install.sh，然后检查日志中是否有 Kafka / MinIO 连接错误 | Tempo namespace |
+| 8 抓取 | 显示 Prometheus 的选择器；需要时经你确认后给 Tempo namespace 加标签 | Tempo namespace 的标签 |
+| 9 Remote Write | 检查开关；未开启时先显示 helm diff，确认后执行 upgrade | **Prometheus**（重启一次） |
+| 10 Grafana | 为 sidecar 创建数据源 ConfigMap，或通过 API 创建数据源，然后做健康检查 | **Grafana**（新增一个数据源） |
+| 11 Operator | 确认 webhook 的失败策略为 Ignore 后安装 Operator；创建 Instrumentation | **集群级**（CRD / RBAC / webhook） |
+| 12 注入 | 给业务 namespace 加标签，给你选中的 Deployment 加注解，并确认 agent 已注入 | **业务服务**（各滚动重启一次） |
+| 13 验证 | 轮询 gateway 指标直到收到 span，再轮询 Prometheus 直到出现 Service Graph 指标，并列出每条调用边 | 无 |
+
+凭据和证书保存在 `build/secrets/`；不含密码的进度保存在 `build/install-state.env`。脚本退出时会关闭所有端口转发。

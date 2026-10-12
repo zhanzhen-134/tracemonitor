@@ -136,17 +136,8 @@ liveStore:
   config:
     readiness_target_lag: 5s
   zoneAwareReplication:
-    enabled: true
-    topologyKey: topology.kubernetes.io/zone
-    maxUnavailable: 1
-    noDownscale: true
-    zones:
-    - name: zone-a
-      nodeSelector:
-        topology.kubernetes.io/zone: <ZONE_A>
-    - name: zone-b
-      nodeSelector:
-        topology.kubernetes.io/zone: <ZONE_B>
+    enabled: false
+    noDownscale: false
   resources:
     requests:
       cpu: '1'
@@ -194,7 +185,7 @@ queryFrontend:
   podDisruptionBudget:
     enabled: true
 rollout_operator:
-  enabled: true
+  enabled: false
   image:
     tag: v0.40.0
 memcached:

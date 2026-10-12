@@ -36,8 +36,13 @@ for svc in services.values():
                 names={p['name'] for c in w['spec']['template']['spec']['containers'] for p in c.get('ports',[])}
                 assert port['targetPort'] in names, f'{svc["metadata"]["name"]}: {port}'
 mode=(root/'build/render-mode.txt').read_text()
+zone_file=root/'build/zone-mode.txt'
+zone_mode=zone_file.read_text() if zone_file.exists() else 'multi'
 live=[w for w in workloads if w['metadata']['name'].startswith('tempo-live-store')]
-if mode=='production':
+if mode=='production' and zone_mode=='single':
+    assert len(live)==1 and live[0]['spec']['replicas']==3
+    assert not any(d['kind']=='ZoneAwarePodDisruptionBudget' for d in docs)
+elif mode=='production':
     assert len(live)==2
     assert sum(w['spec']['replicas'] for w in live)==6
     assert all(w['spec']['template']['spec']['nodeSelector']['topology.kubernetes.io/zone'] for w in live)
@@ -53,4 +58,4 @@ for path in (root/'build/manifests').rglob('*.yaml'):
                     for port in rule.get('ports',[]):
                         assert isinstance(port['port'],int), (path,port)
 json.loads((root/'build/integrations/grafana/tempo-overview.json').read_text())
-print(f'PASS: {mode}, {len(workloads)} workloads; ports, selectors, Secret/CA, targets, cache, HA and policies checked')
+print(f'PASS: {mode}/{zone_mode}-zone, {len(workloads)} workloads; ports, selectors, Secret/CA, targets, cache, HA and policies checked')

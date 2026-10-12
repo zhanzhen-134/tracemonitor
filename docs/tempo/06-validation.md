@@ -4,7 +4,7 @@
 
 1. 执行 `scripts/tempo/render.py`，保存 values/包 SHA256/渲染输出。用目标 Kubernetes 版本 kubeconform 校验内置资源；ServiceMonitor/PrometheusRule/rollout CRD 通过目标集群 `kubectl -n "$TEMPO_NAMESPACE" apply --dry-run=server -f <已审阅清单>` 验证。首次安装须先注册 CRD，再检查 CR。
 2. 在有 Docker 的验证机提取 Collector ConfigMap 的 config.yaml；使用 `otel/opentelemetry-collector-contrib:0.135.0 validate --config=<挂载文件>` 校验，证书按最终路径只读挂载。Tempo 使用同版本镜像/真实配置在预生产启动全部 target，检查 unknown field、SASL、TLS、S3 与 RPC 日志；只执行 helm lint 无法验证应用配置。
-3. `helm status tempo` 为 deployed；全部工作负载就绪、PVC Bound；必须包含 8 种 Tempo target、两个 live-store StatefulSet，无 ingester/compactor。确认每区 ordinal 0–2 对应相同 partition，ACTIVE partition 有两个 owner，builder 对 0–2 全覆盖。
+3. `helm status tempo` 为 deployed；全部工作负载就绪、PVC Bound；必须包含 8 种 Tempo target，无 ingester/compactor。单可用区模式为一个 live-store StatefulSet（ordinal 0–2 各对应一个 partition，每个 ACTIVE partition 一个 owner）；双可用区模式为两个 live-store StatefulSet，每区 ordinal 0–2 对应相同 partition，ACTIVE partition 有两个 owner。builder 对 0–2 全覆盖。
 4. 应用 namespace 加获批的 tracing-access=enabled 标签；部署两个 demo 服务，配置 mTLS。`kubectl -n "$DEMO_NAMESPACE" port-forward svc/demo-a 8080:8080`，另一个终端 `curl --fail http://127.0.0.1:8080/call`；保存响应 trace_id、下游 trace_id、开始/结束 epoch 秒。再调用 /error 确认错误状态。
 5. `kubectl -n "$TEMPO_NAMESPACE" port-forward svc/tempo-query-frontend 3200:3200`；设 TEMPO_QUERY_URL=http://127.0.0.1:3200、TRACE_ID 后执行 validate.sh。允许 ingest 可见性延迟，最多按约定窗口重试；不能把空响应视为成功。
 

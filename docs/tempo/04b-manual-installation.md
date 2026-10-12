@@ -70,7 +70,7 @@ mkdir -p work/secrets && chmod 700 work/secrets      # 工作目录，存放替�
 
 | 步骤 | 内容 | 完成标志 |
 |---|---|---|
-| 1 | 集群预检 | 两个可用区、CRD 存在、权限足够 |
+| 1 | 集群预检 | CRD 存在、权限足够 |
 | 2 | 确定 Prometheus / Grafana / 集群参数 | 变量全部确定 |
 | 3 | Kafka：Topic、用户、ACL | Topic 3 分区 3 副本 |
 | 4 | MinIO：bucket、账号、策略 | Tempo 账号 canary 通过 |
@@ -105,7 +105,7 @@ kubectl auth can-i create statefulsets.apps -n "$TEMPO_NAMESPACE"
 
 **预期**：
 
-- 节点的 zone 列中至少有**两个不同的值**。生产配置要求两个可用区，只有一个可用区时不能按本手册安装。
+- ZONE 列为空（节点没有可用区标签）是正常的，第 2.3 步选择单可用区模式即可。
 - 至少有一个 StorageClass。
 - 两个 CRD 都存在（kube-prometheus-stack 会安装它们）。
 - 三个 `auth can-i` 都输出 `yes`。
@@ -147,10 +147,32 @@ echo "$PROMETHEUS_REMOTE_WRITE_URL"
 ### 2.3 可用区与 StorageClass
 
 ```bash
-kubectl get nodes -L topology.kubernetes.io/zone       # 取两个不同的 zone 值
-kubectl get storageclass                               # 取支持 RWO 的，通常是标 (default) 的那个
-export ZONE_A='<zone 1>'
-export ZONE_B='<zone 2>'
+kubectl get nodes -L topology.kubernetes.io/zone
+kubectl get storageclass
+```
+
+**可用区模式**，二选一：
+
+| 模式 | 适用情况 | 结果 |
+|---|---|---|
+| **单可用区（默认）** | 节点没有 zone 标签，或者都在同一个机房 | live-store 1 个 StatefulSet、3 个 Pod；不安装 rollout-operator；节点不需要打标签。某个 live-store 重启期间，对应分区最近几分钟的 trace 暂时查不到，恢复后从 Kafka 补回，不丢数据 |
+| 双可用区 | 节点带有 `topology.kubernetes.io/zone` 标签，并且分布在两个真实的故障域（不同机房 / 机柜 / 电源） | live-store 每个可用区 3 个，共 6 个；额外安装 rollout-operator（CRD + webhook）；一个可用区整体故障时近期查询仍可用 |
+
+```bash
+# 单可用区（默认）
+export ZONE_MODE=single
+export ZONE_VALUES=''
+
+# 双可用区：改用下面四行
+# export ZONE_MODE=multi
+# export ZONE_A='<zone 1>'
+# export ZONE_B='<zone 2>'
+# export ZONE_VALUES='-f work/values-multi-zone.yaml'
+```
+
+**StorageClass**：选支持 RWO 的本地或块存储，例如 `local-path`。不要选业务专用的共享存储；NFS 类存储不建议用于 Tempo 的 WAL。
+
+```bash
 export STORAGE_CLASS='<StorageClass 名>'
 ```
 
@@ -286,9 +308,7 @@ spec:
       operations: [Read, Describe]
     - resource: {type: group, name: metrics-generator, patternType: literal}
       operations: [Read, Describe]
-    - resource: {type: group, name: tempo-live-store-zone-a, patternType: literal}
-      operations: [Read, Describe]
-    - resource: {type: group, name: tempo-live-store-zone-b, patternType: literal}
+    - resource: {type: group, name: tempo-live-store, patternType: literal}   # 双可用区模式：改为 tempo-live-store-zone-a、tempo-live-store-zone-b 两条
       operations: [Read, Describe]
 ```
 
@@ -387,7 +407,7 @@ $KX "$KBIN/kafka-topics.sh" $KARGS --create --topic tempo-traces --partitions 3 
 
 $KX "$KBIN/kafka-acls.sh" $KARGS --add --allow-principal User:tempo \
   --operation Read --operation Write --operation Describe --topic tempo-traces
-for g in block-builder metrics-generator tempo-live-store-zone-a tempo-live-store-zone-b; do
+for g in block-builder metrics-generator tempo-live-store; do   # 双可用区模式：tempo-live-store 换成 tempo-live-store-zone-a tempo-live-store-zone-b
   $KX "$KBIN/kafka-acls.sh" $KARGS --add --allow-principal User:tempo --operation Read --operation Describe --group "$g"
 done
 
@@ -541,6 +561,7 @@ cp charts/tempo/values-production.yaml work/
 cp -r manifests/tempo manifests/otel-gateway manifests/otel-instrumentation work/
 mkdir -p work/grafana && cp integrations/grafana/datasources.yaml work/grafana/
 rm -f work/tempo/secret.example.yaml         # 仅说明结构，不使用
+[ "$ZONE_MODE" = multi ] && cp charts/tempo/values-multi-zone.yaml work/   # 仅双可用区模式
 ```
 
 ### 5.2 替换占位符
@@ -549,14 +570,14 @@ rm -f work/tempo/secret.example.yaml         # 仅说明结构，不使用
 
 ```bash
 for v in TEMPO_NAMESPACE MONITORING_NAMESPACE GRAFANA_NAMESPACE KAFKA_NAMESPACE MINIO_NAMESPACE \
-         STORAGE_CLASS ZONE_A ZONE_B KAFKA_BOOTSTRAP KAFKA_TOPIC KAFKA_SASL_MECHANISM KAFKA_PORT \
+         STORAGE_CLASS ZONE_MODE KAFKA_BOOTSTRAP KAFKA_TOPIC KAFKA_SASL_MECHANISM KAFKA_PORT \
          MINIO_ENDPOINT MINIO_BUCKET MINIO_PORT PROMETHEUS_REMOTE_WRITE_URL PROMETHEUS_RELEASE PROMETHEUS_PORT \
          PROMETHEUS_UID ELASTICSEARCH_UID; do
   printf '%-28s %s\n' "$v" "${!v:-<未设置>}"
 done
 ```
 
-**预期**：没有 `<未设置>`。
+**预期**：没有 `<未设置>`。双可用区模式下还要确认 `ZONE_A`、`ZONE_B` 已设置且不同。
 
 执行替换。分隔符用 `|`，因为 URL 中含有 `/`：
 
@@ -594,7 +615,8 @@ grep -rn '<[A-Z][A-Z0-9_]*>' work --exclude-dir=secrets && echo '仍有占位符
 
 | 文件 | 占位符 |
 |---|---|
-| `work/values-production.yaml` | STORAGE_CLASS、KAFKA_SASL_MECHANISM、KAFKA_BOOTSTRAP、KAFKA_TOPIC、MINIO_ENDPOINT、MINIO_BUCKET、PROMETHEUS_REMOTE_WRITE_URL、ZONE_A、ZONE_B、PROMETHEUS_RELEASE |
+| `work/values-production.yaml` | STORAGE_CLASS、KAFKA_SASL_MECHANISM、KAFKA_BOOTSTRAP、KAFKA_TOPIC、MINIO_ENDPOINT、MINIO_BUCKET、PROMETHEUS_REMOTE_WRITE_URL、PROMETHEUS_RELEASE |
+| `work/values-multi-zone.yaml`（仅双可用区模式） | ZONE_A、ZONE_B |
 | `work/tempo/namespace.yaml` | TEMPO_NAMESPACE |
 | `work/tempo/networkpolicy.yaml` | TEMPO_NAMESPACE、MONITORING_NAMESPACE、GRAFANA_NAMESPACE、KAFKA_NAMESPACE、KAFKA_PORT、MINIO_NAMESPACE、MINIO_PORT、PROMETHEUS_PORT |
 | `work/tempo/prometheusrule.yaml` | TEMPO_NAMESPACE（多处）、PROMETHEUS_RELEASE |
@@ -632,9 +654,10 @@ grep sha256 charts/tempo/versions.json
 **预期**：两个值相同（`6e02759562a012706c26d5c862380cbce2db6281124476d81884518f03b41038`）。不同说明包被改动过，停止安装。
 
 ```bash
-helm lint charts/tempo/tempo-distributed-3.11.1.tgz -f work/values-production.yaml
+helm lint charts/tempo/tempo-distributed-3.11.1.tgz -f work/values-production.yaml $ZONE_VALUES
 helm template tempo charts/tempo/tempo-distributed-3.11.1.tgz -n "$TEMPO_NAMESPACE" \
-  -f work/values-production.yaml > work/tempo-rendered.yaml
+  -f work/values-production.yaml $ZONE_VALUES > work/tempo-rendered.yaml
+grep -c 'name: tempo-live-store' work/tempo-rendered.yaml
 
 grep -o -- '-target=[a-z-]*' work/tempo-rendered.yaml | sort -u
 grep -n -A3 'processors:' work/tempo-rendered.yaml | sed -n 1,4p
@@ -645,6 +668,7 @@ grep -n -A2 'remote_write:' work/tempo-rendered.yaml
 
 - `helm lint` 输出 `1 chart(s) linted, 0 chart(s) failed`。
 - target 共 8 个：backend-scheduler、backend-worker、block-builder、distributor、live-store、metrics-generator、querier、query-frontend，没有 ingester 和 compactor。
+- 单可用区模式：只有一个 `tempo-live-store` StatefulSet，没有 `tempo-rollout-operator`。双可用区模式：有 `tempo-live-store-zone-a` 和 `tempo-live-store-zone-b`，并有 `tempo-rollout-operator`。
 - processors 中包含 `service-graphs`。
 - remote_write 的 url 是第 2.2 步确定的地址。
 
@@ -722,7 +746,7 @@ kubectl -n "$TEMPO_NAMESPACE" apply -f work/tempo/networkpolicy.yaml
 
 ```bash
 helm upgrade --install tempo charts/tempo/tempo-distributed-3.11.1.tgz \
-  -n "$TEMPO_NAMESPACE" -f work/values-production.yaml --wait --timeout 20m
+  -n "$TEMPO_NAMESPACE" -f work/values-production.yaml $ZONE_VALUES --wait --timeout 20m
 ```
 
 安装过程中，可以在另一个终端用 `kubectl -n "$TEMPO_NAMESPACE" get pods -w` 观察。
@@ -730,12 +754,12 @@ helm upgrade --install tempo charts/tempo/tempo-distributed-3.11.1.tgz \
 **预期**：
 
 - 命令输出 `STATUS: deployed`。
-- `kubectl -n "$TEMPO_NAMESPACE" get pods` 中全部 Pod Ready：distributor、querier、query-frontend、live-store-zone-a、live-store-zone-b、block-builder、backend-scheduler、backend-worker、metrics-generator、rollout-operator。
+- `kubectl -n "$TEMPO_NAMESPACE" get pods` 中全部 Pod Ready：distributor、querier、query-frontend、live-store（单可用区模式为 `tempo-live-store-0`～`2`；双可用区模式为 zone-a、zone-b 各 3 个，并多出 rollout-operator）、block-builder、backend-scheduler、backend-worker、metrics-generator。
 - `kubectl -n "$TEMPO_NAMESPACE" get pvc` 全部为 `Bound`。
 
 | 失败现象 | 排查 |
 |---|---|
-| Pod `Pending` | `kubectl -n "$TEMPO_NAMESPACE" describe pod <pod>`：资源不足、StorageClass 不对、zone 标签与 ZONE_A / ZONE_B 不匹配 |
+| Pod `Pending` | `kubectl -n "$TEMPO_NAMESPACE" describe pod <pod>`：资源不足、StorageClass 不对；双可用区模式下还可能是 zone 标签与 ZONE_A / ZONE_B 不匹配 |
 | Pod `CrashLoopBackOff` | `kubectl -n "$TEMPO_NAMESPACE" logs <pod> --previous`：`SASL authentication failed` 是 Kafka 账号问题，`x509` 是 CA 或 SAN 问题，`AccessDenied` 是 MinIO 策略问题 |
 | live-store 长时间不 Ready | 正在追 Kafka 消费进度，或连不上 Kafka；查看日志 |
 | Helm 超时 | 修复上面的问题后，重新执行同一条 `helm upgrade --install` |

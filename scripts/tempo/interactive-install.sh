@@ -15,7 +15,7 @@ PROM_LP=19090 GRAFANA_LP=13000 GW_LP=18888
 OPERATOR_CHART_VERSION=0.96.0
 
 STATE_VARS=(TEMPO_NAMESPACE MONITORING_NAMESPACE GRAFANA_NAMESPACE PROMETHEUS_RELEASE KPS_VERSION
-  PROMETHEUS_SVC PROMETHEUS_SVC_PORT PROMETHEUS_PORT PROMETHEUS_REMOTE_WRITE_URL ZONE_A ZONE_B STORAGE_CLASS
+  PROMETHEUS_SVC PROMETHEUS_SVC_PORT PROMETHEUS_PORT PROMETHEUS_REMOTE_WRITE_URL ZONE_MODE ZONE_A ZONE_B STORAGE_CLASS
   CHANGE_APPROVAL_ID OTEL_OPERATOR_NAMESPACE KAFKA_NAMESPACE KAFKA_BOOTSTRAP KAFKA_PORT KAFKA_TOPIC
   KAFKA_SASL_MECHANISM KAFKA_TLS MINIO_NAMESPACE MINIO_ENDPOINT MINIO_PORT MINIO_BUCKET MINIO_TLS
   GRAFANA_SVC GRAFANA_SVC_PORT GRAFANA_DEPLOY PROMETHEUS_UID ELASTICSEARCH_UID SAMPLING_RATIO INJECTED)
@@ -180,12 +180,22 @@ for s in d["items"]:
 
   local zones scs
   mapfile -t zones < <(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.labels.topology\.kubernetes\.io/zone}{"\n"}{end}' | tr -d '\r' | sed '/^$/d' | sort -u)
-  if ((${#zones[@]} < 2)); then
-    die "节点只有 ${#zones[@]} 个可用区（topology.kubernetes.io/zone）。生产配置要求两个不同可用区，见 docs/tempo/02-prerequisites.md"
+  ZONE_MODE=single
+  if ((${#zones[@]} >= 2)); then
+    info "检测到 ${#zones[@]} 个可用区：${zones[*]}"
+    if confirm "使用双可用区模式（live-store 分两组跨区部署，并安装 rollout-operator）？"; then
+      ZONE_MODE=multi
+      pick ZONE_A "选择 ZONE_A" "${zones[@]}"
+      pick ZONE_B "选择 ZONE_B（必须与 ZONE_A 不同）" "${zones[@]}"
+      [[ "$ZONE_A" != "$ZONE_B" ]] || die "ZONE_A 与 ZONE_B 不能相同"
+    fi
+  else
+    info "节点没有可用区标签（或只有一个可用区），使用单可用区模式"
   fi
-  pick ZONE_A "选择 ZONE_A" "${zones[@]}"
-  pick ZONE_B "选择 ZONE_B（必须与 ZONE_A 不同）" "${zones[@]}"
-  [[ "$ZONE_A" != "$ZONE_B" ]] || die "ZONE_A 与 ZONE_B 不能相同"
+  if [[ "$ZONE_MODE" == single ]]; then
+    ZONE_A='' ZONE_B=''
+    warn "单可用区模式：live-store 共 3 个；某个 live-store 重启期间，对应分区最近几分钟的 trace 暂时查不到（不丢数据）"
+  fi
 
   kubectl get storageclass
   mapfile -t scs < <(kubectl get storageclass -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | tr -d '\r')
@@ -195,6 +205,9 @@ for s in d["items"]:
 # ====================================================================================
 # 5a. Kafka
 # ====================================================================================
+live_store_groups() {   # Kafka consumer groups used by live-store, depending on zone mode
+  if [[ "${ZONE_MODE:-single}" == multi ]]; then echo tempo-live-store-zone-a tempo-live-store-zone-b; else echo tempo-live-store; fi
+}
 kafka_write_creds() { umask 077; printf 'KAFKA_USERNAME=%s\nKAFKA_PASSWORD=%s\n' "$1" "$2" > "$SECRETS/kafka.env"; }
 
 kafka_strimzi() {
@@ -233,7 +246,7 @@ for l in d["spec"]["kafka"].get("listeners",[]):
     - resource: {type: topic, name: $KAFKA_TOPIC, patternType: literal}
       operations: [Read, Write, Describe]"
     local g
-    for g in block-builder metrics-generator tempo-live-store-zone-a tempo-live-store-zone-b; do
+    for g in block-builder metrics-generator $(live_store_groups); do
       acl+="
     - resource: {type: group, name: $g, patternType: literal}
       operations: [Read, Describe]"
@@ -348,7 +361,7 @@ kafka_cli() {
       run kx "$kbin/kafka-acls.sh" "${K[@]}" --add --allow-principal User:tempo \
         --operation Read --operation Write --operation Describe --topic "$KAFKA_TOPIC"
       local g
-      for g in block-builder metrics-generator tempo-live-store-zone-a tempo-live-store-zone-b; do
+      for g in block-builder metrics-generator $(live_store_groups); do
         run kx "$kbin/kafka-acls.sh" "${K[@]}" --add --allow-principal User:tempo --operation Read --operation Describe --group "$g"
       done
     else
@@ -569,6 +582,7 @@ s_grafana_uids() {
 # 3/4. Render, adapt for plaintext dependencies, preflight
 # ====================================================================================
 s_render() {
+  export ZONE_A="${ZONE_A:-}" ZONE_B="${ZONE_B:-}"
   export KAFKA_TLS MINIO_TLS TEMPO_NAMESPACE STORAGE_CLASS KAFKA_BOOTSTRAP KAFKA_TOPIC KAFKA_SASL_MECHANISM MINIO_ENDPOINT MINIO_BUCKET \
     PROMETHEUS_REMOTE_WRITE_URL PROMETHEUS_RELEASE ZONE_A ZONE_B MONITORING_NAMESPACE GRAFANA_NAMESPACE \
     KAFKA_NAMESPACE MINIO_NAMESPACE PROMETHEUS_UID ELASTICSEARCH_UID KAFKA_PORT MINIO_PORT PROMETHEUS_PORT

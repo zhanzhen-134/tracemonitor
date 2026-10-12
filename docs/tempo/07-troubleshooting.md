@@ -16,7 +16,7 @@
 | 无派生指标 | processors、Kafka group lag、WAL、remote-write 4xx | 启用 receiver/正确 auth；避免反复重启 generator |
 | Service Graph 缺边 | 两侧 span/parent context、采样一致性、wait 与丢弃 | 检查传播和 unmatched 边，避免每层随机采样 |
 | target missing | ServiceMonitor label/namespaceSelector、端口名 | 检查两层选择器与网络策略；缺系列不等于零故障 |
-| webhook 拒绝 drain | operator 健康、同 partition 另一 AZ、CRD/cert | 恢复另一 owner 或 operator；不可无评审删除 webhook |
+| webhook 拒绝 drain（仅双可用区模式） | operator 健康、同 partition 另一 AZ、CRD/cert | 恢复另一 owner 或 operator；不可无评审删除 webhook |
 | Logs 无关联 | trace_id keyword、时间窗口、JSON 解码、Grafana UID | 检查 ES mapping 与数据源，不把全部 trace 写 ES |
 
 常用只读命令：`kubectl ... get events --sort-by=.lastTimestamp`、`kubectl ... describe pod <pod>`、`kubectl ... logs <pod> --all-containers --since=15m`、`kubectl ... logs <pod> --previous`。输出可能含连接地址/业务数据，按敏感日志管理。

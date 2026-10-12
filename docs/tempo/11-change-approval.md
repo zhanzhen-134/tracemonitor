@@ -5,7 +5,7 @@
 | 变更 | 影响与评审重点 | 恢复方式 |
 |---|---|---|
 | Namespace、工作负载、PVC、NetworkPolicy | 资源配额、两 AZ 调度、DNS/CNI、内部明文通道符合基线 | 回退清单，保留 PVC |
-| rollout-operator CRD/RBAC/webhook | 集群级 API/准入资源；仅目标 namespace 的滚动/驱逐保护；已有安装的所有权 | 先恢复 webhook 服务，不直接删除保护 |
+| rollout-operator CRD/RBAC/webhook（仅双可用区模式） | 集群级 API/准入资源；仅目标 namespace 的滚动/驱逐保护；已有安装的所有权 | 先恢复 webhook 服务，不直接删除保护 |
 | Kafka 新 Topic/ACL | RF/ISR、磁盘、16000000 字节消息、消费组与共享 broker fetch 限制 | 停入口、排空后退役，不能回滚已过期数据 |
 | MinIO Bucket/账号/policy | 容量、EC/复制、生命周期、证书和删除权限 | 恢复账号/策略，删除数据依赖备份 |
 | Prometheus receiver/selector/exemplar | 新写入负载、TSDB 基数、安全访问、监控对象发现 | 先停 generator 写入，再恢复原 values |

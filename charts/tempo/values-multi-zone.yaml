@@ -1,0 +1,15 @@
+liveStore:
+  zoneAwareReplication:
+    enabled: true
+    topologyKey: topology.kubernetes.io/zone
+    maxUnavailable: 1
+    noDownscale: true
+    zones:
+    - name: zone-a
+      nodeSelector:
+        topology.kubernetes.io/zone: <ZONE_A>
+    - name: zone-b
+      nodeSelector:
+        topology.kubernetes.io/zone: <ZONE_B>
+rollout_operator:
+  enabled: true

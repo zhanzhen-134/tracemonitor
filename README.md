@@ -22,8 +22,8 @@ export TEMPO_NAMESPACE='<与参数文件一致>'
 bash scripts/tempo/preflight-check.sh
 ```
 
-默认生产示例：3 个 Kafka 分区、2 个可用区、6 个 Live Store、3 个 Block Builder；资源与 30 天保留期均为待压测假设。应用到 Collector 使用 mTLS，Collector 到 Tempo 及 Tempo 内部 RPC 使用受 NetworkPolicy 限制的集群明文通道，需按安全基线评审；需要全链路加密时先配置已有 service mesh 或 Tempo RPC TLS 再上线。
+默认生产示例：3 个 Kafka 分区、单可用区 3 个 Live Store（填写 ZONE_A / ZONE_B 时为双可用区 6 个）、3 个 Block Builder；资源与 30 天保留期均为待压测假设。应用到 Collector 使用 mTLS，Collector 到 Tempo 及 Tempo 内部 RPC 使用受 NetworkPolicy 限制的集群明文通道，需按安全基线评审；需要全链路加密时先配置已有 service mesh 或 Tempo RPC TLS 再上线。
 
-生产包启用 rollout-operator，增加 CRD、RBAC 和 admission webhook；这是跨区滚动更新及驱逐保护所需的额外组件。复用现有实例时按前置条件调整，不能重复安装。Backend Scheduler 保持单实例并使用 PVC，不承诺所有组件无中断。
+双可用区模式（`charts/tempo/values-multi-zone.yaml`）启用 rollout-operator，增加 CRD、RBAC 和 admission webhook；这是跨区滚动更新及驱逐保护所需的额外组件，单可用区模式不安装。复用现有实例时按前置条件调整，不能重复安装。Backend Scheduler 保持单实例并使用 PVC，不承诺所有组件无中断。
 
 已做的本地检查及尚未执行的集群检查见 [验证报告](docs/tempo/10-verification-report.md)，现有平台变更见 [上线变更清单](docs/tempo/11-change-approval.md)。不要将 Helm 渲染成功视为生产验收通过。

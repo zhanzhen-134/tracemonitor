@@ -150,7 +150,7 @@ cp environment.example.json environment.local.json
 | `TEMPO_NAMESPACE` | 为 Tempo 新建的专用 namespace，小写字母数字和 `-` |
 | `DEMO_NAMESPACE` / `DEMO_IMAGE` | 只接入现有业务、不部署示例应用时，两个都填空字符串 `""`，render 会跳过示例清单；需要示例时见附录 B |
 | `STORAGE_CLASS` | `kubectl get storageclass`，选支持 RWO 的那个 |
-| `ZONE_A` / `ZONE_B` | `kubectl get nodes -L topology.kubernetes.io/zone`，取两个不同的值 |
+| `ZONE_A` / `ZONE_B` | **可以留空**。两个都留空 `""` 为单可用区模式：live-store 共 3 个，不安装 rollout-operator，节点不需要 zone 标签。只有节点带有 `topology.kubernetes.io/zone` 标签、并且分布在两个真实的故障域时，才填两个不同的值（双可用区模式）。查看：`kubectl get nodes -L topology.kubernetes.io/zone` |
 | `KAFKA_BOOTSTRAP` / `KAFKA_TOPIC` / `KAFKA_SASL_MECHANISM` / `KAFKA_NAMESPACE` / `KAFKA_PORT` | 在第 5.2～5.4 步创建 Topic 和用户时确定；机制只能是 `PLAIN`、`SCRAM-SHA-256`、`SCRAM-SHA-512` |
 | `MINIO_ENDPOINT` / `MINIO_BUCKET` / `MINIO_NAMESPACE` / `MINIO_PORT` | 在第 5.6～5.9 步确定；endpoint 形如 `minio.minio.svc.cluster.local:9000`，不含 `https://` |
 
@@ -377,9 +377,7 @@ spec:
       operations: [Read, Describe]
     - resource: {type: group, name: metrics-generator, patternType: literal}
       operations: [Read, Describe]
-    - resource: {type: group, name: tempo-live-store-zone-a, patternType: literal}
-      operations: [Read, Describe]
-    - resource: {type: group, name: tempo-live-store-zone-b, patternType: literal}
+    - resource: {type: group, name: tempo-live-store, patternType: literal}   # 双可用区模式：改为 tempo-live-store-zone-a、tempo-live-store-zone-b 两条
       operations: [Read, Describe]
 ```
 
@@ -473,7 +471,7 @@ kx "$KBIN/kafka-topics.sh" --bootstrap-server "$KAFKA_BOOTSTRAP_IN_POD" --comman
 
 kx "$KBIN/kafka-acls.sh" --bootstrap-server "$KAFKA_BOOTSTRAP_IN_POD" --command-config /tmp/admin.properties \
   --add --allow-principal User:tempo --operation Read --operation Write --operation Describe --topic tempo-traces
-for g in block-builder metrics-generator tempo-live-store-zone-a tempo-live-store-zone-b; do
+for g in block-builder metrics-generator tempo-live-store; do   # 双可用区模式：tempo-live-store 换成 tempo-live-store-zone-a tempo-live-store-zone-b
   kx "$KBIN/kafka-acls.sh" --bootstrap-server "$KAFKA_BOOTSTRAP_IN_POD" --command-config /tmp/admin.properties \
     --add --allow-principal User:tempo --operation Read --operation Describe --group "$g"
 done
@@ -717,14 +715,14 @@ kubectl -n "$TEMPO_NAMESPACE" get statefulset tempo-metrics-generator
 **预期**：
 
 - `helm status` 为 `deployed`。
-- 以下工作负载全部 Ready，PVC 全部 `Bound`：distributor、querier、query-frontend、live-store-zone-a、live-store-zone-b、block-builder、backend-scheduler、backend-worker、metrics-generator、rollout-operator、otel-gateway。
+- 以下工作负载全部 Ready，PVC 全部 `Bound`：distributor、querier、query-frontend、live-store（单可用区模式为 1 个 StatefulSet、3 个 Pod；双可用区模式为 live-store-zone-a、live-store-zone-b 两个 StatefulSet，并多出 rollout-operator）、block-builder、backend-scheduler、backend-worker、metrics-generator、otel-gateway。
 
 | 失败现象 | 排查方向 |
 |---|---|
-| Pod `Pending` | `kubectl describe pod`：资源不足、StorageClass、zone 标签与 nodeSelector 不匹配 |
+| Pod `Pending` | `kubectl describe pod`：资源不足、StorageClass 不对；双可用区模式下还可能是 zone 标签与 ZONE_A / ZONE_B 不匹配 |
 | Pod `CrashLoopBackOff` | `kubectl logs <pod> --previous`：Kafka SASL/TLS、MinIO 证书/权限 |
 | Live Store 长时间不 Ready | Kafka 消费 lag 未追平，见 [07-troubleshooting.md](07-troubleshooting.md) |
-| Helm 报 CRD 无匹配资源 | 先单独安装包内 rollout-operator CRD：`tar -xzf charts/tempo/tempo-distributed-3.11.1.tgz -C build/ && kubectl apply --server-side -f build/tempo-distributed/charts/rollout-operator/charts/crds/crds/`，然后在 values 中设 `rollout_operator.crds.enabled=false`，重新 render 并再次执行 install.sh |
+| Helm 报 CRD 无匹配资源（仅双可用区模式） | 先单独安装包内 rollout-operator CRD：`tar -xzf charts/tempo/tempo-distributed-3.11.1.tgz -C build/ && kubectl apply --server-side -f build/tempo-distributed/charts/rollout-operator/charts/crds/crds/`，然后在 values 中设 `rollout_operator.crds.enabled=false`，重新 render 并再次执行 install.sh |
 
 补充：
 
