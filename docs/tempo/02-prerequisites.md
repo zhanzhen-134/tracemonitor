@@ -11,14 +11,16 @@
 | Kafka 版本、broker 数、磁盘 | 至少 3 broker 才能使用 RF=3；固定平台 CLI 版本；与 Tempo 3.1.0 联调 |
 | KAFKA_BOOTSTRAP / TOPIC | bootstrap 为 host:port；网络须覆盖全部 advertised.listeners；独立 Topic |
 | KAFKA_SASL_MECHANISM | PLAIN、SCRAM-SHA-256、SCRAM-SHA-512；默认启用 TLS；凭据不写 JSON |
-| KAFKA_CIDR / PORT | 实际 broker 地址范围与端口；多网段应增加 NetworkPolicy 条目，不能随意放行 0.0.0.0/0 |
+| KAFKA_NAMESPACE / PORT | 集群内 Kafka broker Pod 所在 namespace 与 broker **容器端口**（NetworkPolicy 按 DNAT 后的 Pod 端口匹配）；Tempo 出口按 namespace 放行 |
 | MINIO_ENDPOINT / BUCKET | endpoint 不含 https://，含端口；独立 bucket；TLS SAN 与主机名匹配 |
-| MINIO_CIDR / PORT | 核验经 Service DNAT 后 CNI 策略匹配；必要时改 namespaceSelector + podSelector |
-| PROMETHEUS_REMOTE_WRITE_URL | 完整 http(s)://host:port/api/v1/write；确认 receiver 开启及认证要求 |
+| MINIO_NAMESPACE / PORT | 集群内 MinIO Pod 所在 namespace 与 S3 API **容器端口**；Tempo 出口按 namespace 放行 |
+| PROMETHEUS_REMOTE_WRITE_URL | 完整 http(s)://host:port/api/v1/write；kube-prometheus-stack 通常为 `http://<release>-kube-prometheus-prometheus.<ns>.svc.cluster.local:9090/api/v1/write`（不要用 headless 的 prometheus-operated）；确认 receiver 开启及认证要求，查找方法见 04 第 2.1 步 |
 | PROMETHEUS_RELEASE | ServiceMonitor / PrometheusRule 标签必须匹配现有 selector，不能猜 release 名 |
 | MONITORING_NAMESPACE、GRAFANA_NAMESPACE | 现有实例所在命名空间；本例网络策略按 namespace 放行 |
-| Grafana/ES/Prometheus 版本与 UID | 记录准确版本；确认日志数据源支持关联、exemplar 能力和索引 time field |
-| DEMO_NAMESPACE / DEMO_IMAGE | 受控验收 namespace 与已推送的固定版本镜像；不自动部署示例 |
+| Grafana/ES/Prometheus 版本与 UID | 记录准确版本；确认日志数据源支持关联、exemplar 能力和索引 time field。PROMETHEUS_UID / ELASTICSEARCH_UID 为 Grafana 现有数据源 UID（数据源编辑页 URL 最后一段，或 `GET /api/datasources`），Service Graph 依赖其正确，见 04 第 2.2 步 |
+| DEMO_NAMESPACE / DEMO_IMAGE | 受控验收 namespace 与已推送的固定版本镜像；不自动部署示例。不使用示例时两项都填空字符串，render 跳过示例清单 |
+| PROMETHEUS_RELEASE 取值 | 填 `helm list` 的 NAME 列（如 `kube-prometheus-stack`），不是 CHART 列（如 `kube-prometheus-stack-75.6.0`）；以 Prometheus CR 的 serviceMonitorSelector 中 release 标签值为准 |
+| OpenTelemetry Operator | Java 业务自动注入用，固定 Chart 0.96.0 / Operator 0.135.0 / Java agent 1.33.6；集群已有 Operator 时先确认版本与所有权，不重复安装；内网需同步 operator 与 autoinstrumentation-java 镜像 |
 | 已有 OTel Gateway | 如可复用，使用 GATEWAY_MODE=reuse；合并 traces pipeline，不替换其其他 pipeline |
 | 证书/Secret | tempo-credentials、tempo-ca、otel-gateway-tls；CA/客户端证书生命周期和轮换负责人 |
 | SLO/RPO/RTO/吞吐 | 明确写入成功率、近期查询可用性、长期查询延迟和故障恢复预算 |

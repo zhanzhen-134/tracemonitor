@@ -4,11 +4,12 @@
 
 - `charts/tempo/`：固定版本原始 Helm 包、生产 values、开发覆盖配置、版本与 SHA256。
 - `manifests/tempo/`、`manifests/otel-gateway/`、`manifests/python-otel-demo/`：按项目组织的 Kubernetes 清单。
+- `charts/otel-operator/`、`manifests/otel-instrumentation/`：OpenTelemetry Operator values 与 Java 自动注入 Instrumentation，用于现有 Java 业务免改代码接入。
 - `scripts/tempo/`、`scripts/kafka/`：参数渲染、预检、安装、验收、回滚及外部 Topic 创建脚本。
 - `integrations/`：现有 Grafana、Prometheus、ELK 的增量配置，不部署这些平台。
 - `docs/tempo/`：架构、前置条件、容量、部署、集成、验收与运维。
 
-先阅读 [前置条件](docs/tempo/02-prerequisites.md)，按 [安装手册](docs/tempo/04-installation.md) 实施。
+先阅读 [前置条件](docs/tempo/02-prerequisites.md)，按 [安装手册](docs/tempo/04-installation.md) 实施；也可以运行交互式脚本 `bash scripts/tempo/interactive-install.sh`，它会按手册顺序执行到 Grafana 中能看到 Service Graph 为止。
 
 ```bash
 python -m pip install -r scripts/tempo/requirements.txt

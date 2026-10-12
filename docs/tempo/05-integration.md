@@ -1,6 +1,6 @@
 # 现有平台增量集成
 
-共享设施变更均需负责人审批；本节命令由对应平台管理员运行。Kafka/MinIO CLI 连接的是显式 endpoint，没有 Kubernetes namespace；kubectl 操作使用当前 kubeconfig context，显式指定 namespace。
+本节是各平台集成的原理与约束说明；集群内 Kafka/MinIO、Prometheus、Grafana、ES 的逐条操作命令以 [04-installation.md](04-installation.md) 为准，由安装执行人执行，共享设施变更先取得审批。Kafka/MinIO CLI 连接的是显式 endpoint，没有 Kubernetes namespace；kubectl 操作使用当前 kubeconfig context，显式指定 namespace。
 
 ## Kafka
 
@@ -18,7 +18,7 @@ kafka-consumer-groups.sh --bootstrap-server "$KAFKA_BOOTSTRAP" --command-config 
 
 脚本遇到已有 Topic 会失败，避免悄悄接受不兼容配置。已建 Topic 仅在审阅 describe/configs 后复用，不盲目 --alter。可单独执行 `scripts/kafka/grant-acls.sh` 修复授权。固定版本源码核验的生产消费组为 `block-builder`、`metrics-generator`、`tempo-live-store-zone-a`、`tempo-live-store-zone-b`；Live Store 组名是 Pod 实例名去掉末尾 `-数字`。本脚本逐组授予 Read/Describe，不授予 `*` group 或业务 Topic 权限。更名或改 zone 时同步修改 ACL，开发单区组名为 `tempo-live-store`。Block Builder 静态分配，不能仅用 consumer-group 成员数判断是否正常；同时看 Tempo partition lag、offset 和对象落盘。
 
-max.message.bytes=16000000 为最小值；平台方同时核验 broker message.max.bytes 与 replica.fetch.max.bytes（及请求限制）能处理该大小。现有共享 broker 参数改变应独立审批。Broker 使用 delete cleanup policy，RF=3、min ISR=2、禁止不安全 leader election；评审磁盘告警和恢复余量。24h retention 不能低于未落 S3 数据最长恢复时间。
+max.message.bytes=16000000 为最小值；同时核验 broker message.max.bytes 与 replica.fetch.max.bytes（及请求限制）能处理该大小，检查与调整命令见 04 第 5.3 步。现有共享 broker 参数改变应独立审批。Broker 使用 delete cleanup policy，RF=3、min ISR=2、禁止不安全 leader election；评审磁盘告警和恢复余量。24h retention 不能低于未落 S3 数据最长恢复时间。
 
 认证变体：SASL PLAIN 与 SCRAM 只改机制；TLS/mTLS 在 `tempo.structuredConfig.ingest.kafka` 增加 tls_cert_path、tls_key_path 并将对应 Secret 文件挂载给所有 Kafka 客户端组件。TLS 不允许 skip verify。获批 PLAINTEXT 才能关闭 tls_enabled 并移除 CA；无 SASL 的场景使用 PLAIN 且用户名/密码同时为空，必须另建经过审核的覆盖文件，默认模板不降级认证。
 
@@ -60,7 +60,7 @@ Exemplar 需要 Prometheus 版本支持并启用 exemplar storage、generator �
 
 ## Grafana 与 ELK
 
-UI：Connections → Data sources → Add Tempo；URL 为 Query Frontend:3200；Save & Test。关联现有 Prometheus/Elasticsearch UID，选择 Service Map、Trace to metrics、Trace to logs 的自定义 Lucene 查询 `trace_id:"${__span.traceId}"`。Provisioning 使用 build/integrations/grafana/datasources.yaml，复制到现有 provisioning 挂载位置或通过原 GitOps 管理。它只新增 UID=tempo，不覆盖整个数据源列表；同名/UID 存在时先审查。配置中的 `$$` 是 Grafana provisioning 防止环境变量展开的转义，不能删掉。
+UI：Connections → Data sources → Add Tempo；URL 为 Query Frontend:3200；Save & Test。关联现有 Prometheus/Elasticsearch UID，选择 Service Map、Trace to metrics、Trace to logs 的自定义 Lucene 查询 `trace_id:"${__span.traceId}"`。Provisioning 使用 build/integrations/grafana/datasources.yaml，复制到现有 provisioning 挂载位置或通过原 GitOps 管理，之后调用 `POST /api/admin/provisioning/datasources/reload`（服务器管理员）或重启 Grafana 才会生效；kube-prometheus-stack 自带 Grafana 则建带 `grafana_datasource: "1"` 标签的 ConfigMap 由 sidecar 自动加载。具体命令见 04 第 10 步。它只新增 UID=tempo，不覆盖整个数据源列表；同名/UID 存在时先审查。配置中的 `$$` 是 Grafana provisioning 防止环境变量展开的转义，不能删掉。
 
 保持原 Logstash/采集链路，JSON 解码后 `trace_id`/`span_id` 为小写十六进制 keyword，service.name 与 deployment.environment 为 keyword，@timestamp 为 date。`integrations/elk/mapping.json` 是用于合并现有 template 的 properties 增量；字段类型冲突需新索引 rollover/reindex 评审，不能在线改既有类型。
 

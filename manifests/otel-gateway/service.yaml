@@ -14,6 +14,9 @@ spec:
   - name: otlp-http
     port: 4318
     targetPort: otlp-http
+  - name: otlp-http-plain
+    port: 4319
+    targetPort: otlp-http-plain
   - name: metrics
     port: 8888
     targetPort: metrics

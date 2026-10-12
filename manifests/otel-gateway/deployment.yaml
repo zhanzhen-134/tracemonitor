@@ -54,6 +54,8 @@ spec:
           containerPort: 4317
         - name: otlp-http
           containerPort: 4318
+        - name: otlp-http-plain
+          containerPort: 4319
         - name: metrics
           containerPort: 8888
         - name: health

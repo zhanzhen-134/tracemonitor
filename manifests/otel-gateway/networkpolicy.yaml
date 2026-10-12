@@ -21,6 +21,8 @@ spec:
       port: 4317
     - protocol: TCP
       port: 4318
+    - protocol: TCP
+      port: 4319
   - from:
     - namespaceSelector:
         matchLabels:

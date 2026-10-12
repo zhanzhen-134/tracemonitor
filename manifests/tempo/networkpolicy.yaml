@@ -75,14 +75,16 @@ spec:
     - protocol: UDP
       port: 7946
   - to:
-    - ipBlock:
-        cidr: <KAFKA_CIDR>
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: <KAFKA_NAMESPACE>
     ports:
     - protocol: TCP
       port: <KAFKA_PORT>
   - to:
-    - ipBlock:
-        cidr: <MINIO_CIDR>
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: <MINIO_NAMESPACE>
     ports:
     - protocol: TCP
       port: <MINIO_PORT>

@@ -3,6 +3,7 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 from pathlib import Path
 import yaml
@@ -34,7 +35,14 @@ def main():
     if Path(args.helm).is_file():
         args.helm = str(Path(args.helm).resolve())
     env = json.loads(args.environment.read_text(encoding='utf-8-sig'))
-    if any('<' in str(v) or not str(v).strip() for v in env.values()):
+    expected = json.loads((ROOT/'environment.example.json').read_text(encoding='utf-8-sig'))
+    missing = sorted(set(expected) - set(env))
+    if missing:
+        raise SystemExit(f'Missing parameters (compare with environment.example.json): {", ".join(missing)}')
+    # The demo is optional: leave DEMO_NAMESPACE and DEMO_IMAGE empty to skip rendering it.
+    demo_keys = ['DEMO_NAMESPACE', 'DEMO_IMAGE']
+    skip_demo = all(not str(env.get(k, '')).strip() for k in demo_keys)
+    if any('<' in str(v) or not str(v).strip() for k, v in env.items() if not (skip_demo and k in demo_keys)):
         raise SystemExit('Replace all environment placeholders before rendering')
     if not re.fullmatch(r'[a-z0-9]([-a-z0-9]*[a-z0-9])?', env['TEMPO_NAMESPACE']):
         raise SystemExit('Invalid Kubernetes namespace')
@@ -48,8 +56,13 @@ def main():
     files = [ROOT/'charts/tempo/values-production.yaml']
     files += list((ROOT/'manifests').rglob('*.yaml'))
     files += list((ROOT/'integrations').rglob('*.yaml'))
+    demo_dir = ROOT/'manifests/python-otel-demo'
+    if skip_demo:
+        shutil.rmtree(out/demo_dir.relative_to(ROOT), ignore_errors=True)
     for path in files:
         if path.name == 'secret.example.yaml':
+            continue
+        if skip_demo and demo_dir in path.parents:
             continue
         docs = [substitute(d, env) for d in yaml.safe_load_all(path.read_text(encoding='utf-8'))]
         target = out/path.relative_to(ROOT)
