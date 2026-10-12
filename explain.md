@@ -1,4 +1,4 @@
-# 安装对现有业务、Kafka、MinIO 的影响说明
+# 安装对现有业务与集群的影响说明
 
 本文说明按 [安装手册](docs/tempo/04-installation.md)、[纯手工安装手册](docs/tempo/04b-manual-installation.md) 或 [交互式脚本](scripts/tempo/interactive-install.sh) 安装时，对现有系统做了哪些改动、为什么要改、会有什么影响，以及如何回退。第 5 节说明仓库中每个脚本具体做了什么。
 
@@ -6,7 +6,7 @@
 
 - **业务代码、业务镜像、业务配置文件都不修改。**
 - 对业务只做两处 Kubernetes 层面的改动：给业务 namespace 打一个标签，给选中的 Deployment 加注解。加注解会触发一次滚动重启，重启后 Pod 里多了一个 Java agent。
-- Kafka 和 MinIO 上只**新增** Tempo 专用的资源（Topic、Bucket、账号、权限），不修改、不读取业务已有的 Topic 和 Bucket。唯一会影响全局的是一个可选的 Kafka broker 参数调整，执行前会单独确认。
+- **业务现有的 Kafka 和 MinIO 完全不使用、不修改。** Tempo 使用自己专用的单节点 Kafka 和 RustFS（对象存储），与 Tempo 一起部署在 `TEMPO_NAMESPACE` 中。对集群的影响只是多占用一些节点资源和两块 PVC。
 
 ---
 
@@ -80,7 +80,7 @@ Operator 会注册一个**对全集群 Pod 创建都生效**的 mutating webhook
 
 ---
 
-## 2. 对 Kafka 的操作
+## 2. Tempo 专用的 Kafka（tempo-kafka）
 
 ### 2.1 为什么 Tempo 需要 Kafka
 
@@ -88,85 +88,66 @@ Tempo 3.x 的写入路径是：
 
 ```text
 otel-gateway → distributor → Kafka Topic → live-store（近期查询）
-                                         → block-builder（写成文件存入 MinIO）
+                                         → block-builder（写成文件存入 RustFS）
                                          → metrics-generator（计算 Service Graph 指标）
 ```
 
-Kafka 在这里是 Tempo **内部的缓冲队列**：distributor 收到数据先写 Kafka 再确认，下游组件故障或重启时，可以从 Kafka 重放，不丢数据。它和业务 Topic 完全无关，不读取也不写入任何业务 Topic。
+Kafka 在这里是 Tempo **内部的缓冲队列**：distributor 收到数据先写 Kafka 再确认，下游组件故障或重启时可以从 Kafka 重放，不丢数据。
 
-### 2.2 做了哪些操作
+### 2.2 部署了什么
 
-| 操作 | 内容 | 目的 |
-|---|---|---|
-| 新建 Topic `tempo-traces` | 3 分区、3 副本、`min.insync.replicas=2`、保留 24 小时、`cleanup.policy=delete`、单条消息上限 16MB（只对该 Topic 生效） | Tempo 专用的数据通道 |
-| 新建用户 `tempo` | SCRAM-SHA-512，随机生成密码 | Tempo 使用独立账号，可以单独吊销 |
-| ACL（Kafka 已开启授权时） | `tempo` 只能读写 `tempo-traces`，只能使用固定的消费组：`block-builder`、`metrics-generator`、`tempo-live-store`（双可用区模式为 `tempo-live-store-zone-a`、`tempo-live-store-zone-b`） | 最小权限，**看不到任何业务 Topic** |
-| （可选）broker 默认参数 | `message.max.bytes`、`replica.fetch.max.bytes` 调到 16000000 | 只在非 Strimzi 方式下、而且你确认后才执行，见 2.4 |
+| 资源 | 内容 |
+|---|---|
+| StatefulSet `tempo-kafka` | 1 个 Pod，镜像 `apache/kafka:4.3.1`，KRaft 单节点（不需要 ZooKeeper）；请求 0.5 核 / 2GB 内存，上限 2 核 / 3GB |
+| PVC `data-tempo-kafka-0` | 大小为 `KAFKA_STORAGE_SIZE`（默认 100Gi） |
+| Service `tempo-kafka`、`tempo-kafka-headless` | 只在集群内访问，端口 9092 |
+| NetworkPolicy `tempo-kafka` | 只允许 Tempo 的 Pod 和初始化 Job 访问 |
+| Job `tempo-kafka-create-topic` | 创建 Topic `tempo-traces`：3 分区、1 副本、保留 24 小时、每分区最多 28GB、单条消息上限 16MB；24 小时后自动清理 |
 
-Strimzi 管理的 Kafka 通过 `KafkaTopic`、`KafkaUser` 资源创建，由 Strimzi 统一管理，不直接用命令行修改。
-
-### 2.3 对 Kafka 的影响
+### 2.3 影响
 
 | 方面 | 影响 |
 |---|---|
-| 磁盘 | 主要影响项。按 [容量算例](docs/tempo/03-capacity-planning.md)（平均 2MB/s 写入），24 小时 × 3 副本约需 **337GB**。实际值取决于业务流量和采样率，上线初期应观察 broker 磁盘使用 |
-| 网络与 IO | 增加写入流量，以及 3 个消费组的读取流量和副本同步流量 |
-| 分区数 | 增加 3 个分区 × 3 副本，对集群元数据的压力可以忽略 |
-| 业务 Topic / 业务消费组 | **不受影响**：没有修改任何已有 Topic、ACL 或消费组 |
-| broker 重启 | 脚本**不会**重启 broker |
+| 业务的 Kafka（lmspro-release 等） | **没有任何影响**：不连接、不读写、不修改配置 |
+| 节点资源 | 增加一个 Pod 的 CPU / 内存占用，以及一块 PVC；使用 `local-path` 时占用所在节点的本地磁盘 |
+| 可用性 | 单节点：Kafka Pod 重启或所在节点故障期间，Tempo 无法写入新数据，otel-gateway 最多重试 5 分钟后丢弃；已写入的数据在 PVC 中，不会丢失 |
+| 安全 | 集群内明文、无认证，由 NetworkPolicy 限制只有 Tempo 能访问 |
 
-### 2.4 需要特别注意的几种情况
+### 2.4 回退
 
-以下情况会影响整个 Kafka，脚本不会自动执行，或者执行前单独确认：
-
-1. **调整 broker 默认消息大小**（非 Strimzi，需要确认）：对所有 Topic 生效，允许更大的消息批次。不需要重启 broker。如果原来的值已经够大，选 N 跳过即可。
-2. **Strimzi 没有 TLS + SCRAM 监听器**：脚本直接停止，提示你手工增加。增加监听器会**滚动重启所有 broker**。
-3. **Kafka 原来没有开启授权**：脚本不会开启，只是不创建 ACL。如果你按手册手工开启 `simple` 授权，**没有配置 ACL 的现有业务客户端会被拒绝访问**，影响很大，必须先评估。
-
-### 2.5 回退
-
-- 删除 `tempo` 用户及其 ACL，删除 `tempo-traces` Topic。Strimzi 下删除对应的 `KafkaTopic` / `KafkaUser` 资源即可。
-- 删除前先停止 Tempo，否则 Tempo 会报错。
-- Topic 中的 trace 数据本来就只保留 24 小时，删除不影响已经写入 MinIO 的历史数据。
+`kubectl -n <TEMPO_NAMESPACE> delete statefulset tempo-kafka`，并删除对应的 Service、NetworkPolicy；确认不再需要其中的数据后删除 PVC `data-tempo-kafka-0`。只影响 Tempo。
 
 ---
 
-## 3. 对 MinIO 的操作
+## 3. Tempo 专用的 RustFS（tempo-rustfs）
 
-### 3.1 为什么 Tempo 需要 MinIO
+### 3.1 为什么 Tempo 需要对象存储
 
-Kafka 只保留 24 小时，live-store 只保存近期数据。block-builder 会把 trace 编码成 Parquet 文件写入对象存储，作为**长期存储**（保留 30 天）。查询 30 天内较早的 trace 时，querier 从 MinIO 读取。backend-worker 定期合并小文件，并删除过期的文件。
+Kafka 只保留 24 小时，live-store 只保存近期数据。block-builder 会把 trace 编码成 Parquet 文件写入对象存储作为**长期存储**（保留 30 天），查询较早的 trace 时 querier 从对象存储读取，backend-worker 定期合并小文件并删除过期文件。RustFS 是兼容 S3 协议的对象存储，Tempo 按 S3 方式访问它。
 
-### 3.2 做了哪些操作
+### 3.2 部署了什么
 
-| 操作 | 内容 | 目的 |
-|---|---|---|
-| 新建 bucket `tempo-traces` | 独立 bucket | 与业务数据隔离 |
-| 新建策略 `tempo-rw` | 只允许操作 `tempo-traces` 这一个 bucket（list / get / put / delete / 分片上传） | 最小权限 |
-| 新建用户 `tempo` 并绑定策略 | 随机生成密钥 | Tempo 使用独立账号，可以单独吊销 |
-| canary 测试 | 用 `tempo` 账号写入、读取并删除 `tempo-traces/_acceptance/probe.txt` | 在安装前确认账号权限正确 |
-| 取 CA 证书 | 只读取 MinIO 的证书文件 | 让 Tempo 能校验 MinIO 的 TLS 证书 |
+| 资源 | 内容 |
+|---|---|
+| StatefulSet `tempo-rustfs` | 1 个 Pod，镜像 `rustfs/rustfs:1.0.0`，单节点单盘；请求 0.25 核 / 512MB 内存，上限 2 核 / 2GB |
+| PVC `data-tempo-rustfs-0` | 大小为 `RUSTFS_STORAGE_SIZE`（默认 500Gi） |
+| Service `tempo-rustfs` | 9000（S3 API）、9001（控制台），只在集群内访问 |
+| NetworkPolicy `tempo-rustfs` | 只允许 Tempo 的 Pod 和初始化 Job 访问 9000 |
+| Secret `tempo-credentials` | RustFS 的 root 密钥，RustFS 与 Tempo 共用 |
+| Job `tempo-rustfs-create-bucket` | 创建 bucket `tempo-traces`，并用 Tempo 的密钥写入、读取、删除一个测试对象；24 小时后自动清理 |
 
-脚本在 MinIO Pod 内执行 `mc` 命令时，配置写在 Pod 的 `/tmp` 下，完成后删除。如果 MinIO 镜像里没有 `mc`，会临时创建一个 `tempo-mc` Pod，用完删除。
-
-### 3.3 对 MinIO 的影响
+### 3.3 影响
 
 | 方面 | 影响 |
 |---|---|
-| 容量 | 主要影响项。按容量算例，30 天约 **2TB** 逻辑数据；物理占用还要再乘以 MinIO 自身的纠删码或复制开销。实际值取决于流量和采样率 |
-| 请求量 | block-builder 定期写入；backend-worker 合并和删除文件；querier 查询时读取。相比业务访问，属于持续、平稳的后台负载 |
-| 业务 bucket | **不受影响**：`tempo` 账号的策略只覆盖 `tempo-traces`，没有修改任何已有 bucket、用户或策略 |
-| MinIO 服务配置 | **不修改**：不改服务端配置，不重启 MinIO，不改证书 |
-| root 账号 | 只读取，用于执行上面的管理命令，不修改，也不写入任何文件 |
-
-注意事项：
-
-- 如果 MinIO 中已经存在名为 `tempo` 的用户，`mc admin user add` 会**重置它的密钥**。执行前用 `mc admin user list` 确认没有重名用户。
-- 如果 MinIO 开启了版本控制，Tempo 删除的过期文件会保留历史版本，继续占用空间，需要另外配置生命周期规则。
+| 业务的 MinIO | **没有任何影响**：不连接、不创建 bucket 或账号 |
+| 节点资源 | 增加一个 Pod 和一块 PVC。30 天 trace 的容量取决于流量和采样率，需要观察使用量并及时扩容 |
+| 可用性 | 单节点：RustFS 不可用期间 block-builder 无法落盘、历史查询失败，数据暂存在 Kafka 中，恢复后追平；停机不能超过 Kafka 的保留时间 |
+| 数据安全 | PVC 是历史 trace 的唯一副本，需要按企业要求做卷快照或备份 |
 
 ### 3.4 回退
 
-删除 `tempo` 用户和 `tempo-rw` 策略，确认不再需要历史 trace 后删除 `tempo-traces` bucket。删除 bucket 会丢失 30 天内的历史 trace，但不影响任何业务数据。
+`kubectl -n <TEMPO_NAMESPACE> delete statefulset tempo-rustfs`，并删除对应的 Service、NetworkPolicy；确认不再需要历史 trace 后删除 PVC `data-tempo-rustfs-0`。只影响 Tempo。
 
 ---
 
@@ -185,7 +166,7 @@ Kafka 只保留 24 小时，live-store 只保存近期数据。block-builder 会
 
 使用 [纯手工安装手册](docs/tempo/04b-manual-installation.md) 时不会用到下面任何脚本；使用 [安装手册](docs/tempo/04-installation.md) 或交互式脚本时会用到。
 
-脚本分为两类：只在本机准备文件（不碰集群），以及对集群执行 kubectl / helm 命令。**会修改 Kafka、MinIO、Prometheus、Grafana 或业务服务的，只有 `interactive-install.sh`。** 其余脚本要么只改 Tempo 自己的 namespace，要么只读。
+脚本分为两类：只在本机准备文件（不碰集群），以及对集群执行 kubectl / helm 命令。**会修改 Prometheus、Grafana 或业务服务的，只有 `interactive-install.sh`。** 其余脚本要么只改 Tempo 自己的 namespace（包括 Tempo 专用的 Kafka 和 RustFS），要么只读。
 
 ### 5.1 只在本机运行，不影响集群
 
@@ -194,9 +175,9 @@ Kafka 只保留 24 小时，live-store 只保存近期数据。block-builder 会
 1. 读取 `environment.local.json` 并校验：
    - 占位符都已填写；
    - namespace 格式正确；
-   - Kafka 认证机制为 PLAIN 或 SCRAM；
+   - Kafka / RustFS 的 PVC 大小格式正确（如 100Gi）；
    - ZONE_A / ZONE_B 要么都留空（单可用区），要么都填写且不同（双可用区）；
-   - 端口为整数；
+   - Prometheus 端口为整数；
    - 对照 `environment.example.json`，缺少参数时会直接列出。
 2. 把 `charts/tempo/values-production.yaml`（双可用区模式下再合并 `values-multi-zone.yaml`）、`manifests/`、`integrations/` 中的 `<TEMPO_NAMESPACE>` 这类占位符替换为实际值，结果写到 `build/`，**不修改原文件**。DEMO_* 留空时跳过示例应用。
 3. 校验 Chart 包的 SHA256，必须与 `versions.json` 一致。
@@ -209,8 +190,8 @@ Kafka 只保留 24 小时，live-store 只保存近期数据。block-builder 会
 
 检查渲染结果：
 
-- Tempo 配置：对象存储为 S3、关闭了 Kafka Topic 自动创建、启用了 Service Graph 处理器。
-- 工作负载：每个 Tempo 容器都挂载了凭据 Secret 和 CA，并设置了资源限制和探针。
+- Tempo 配置：对象存储为 S3 并指向 `tempo-rustfs`、Kafka 指向 `tempo-kafka`、关闭了 Kafka Topic 自动创建、启用了 Service Graph 处理器。
+- 工作负载：每个 Tempo 容器都引用了凭据 Secret，并设置了资源限制和探针。
 - Service：每个 Service 都能选中工作负载。
 - NetworkPolicy：端口都是整数。
 - 副本数：与生产 / 开发模式一致。
@@ -230,16 +211,18 @@ Kafka 只保留 24 小时，live-store 只保存近期数据。block-builder 会
 
 列出节点可用区和 StorageClass，检查 Prometheus Operator 的 CRD 是否存在，用 `kubectl auth can-i` 检查权限。**不做任何修改。**
 
-**[install.sh](scripts/tempo/install.sh)：安装 Tempo，只在 Tempo namespace 内操作**
+**[install.sh](scripts/tempo/install.sh)：部署 Kafka / RustFS 并安装 Tempo，只在 Tempo namespace 内操作**
 
 1. 要求设置 `CHANGE_APPROVAL_ID` 和 `GATEWAY_MODE`。
-2. 检查 namespace 和 3 个 Secret 是否存在（不会创建它们）。
+2. 检查 namespace 和 Secret（`tempo-credentials`、`otel-gateway-tls`）是否存在（不会创建它们）。
 3. 应用 Tempo 的 NetworkPolicy（先做服务端 dry-run）。
-4. 执行 `helm upgrade --install tempo`，最长等待 20 分钟。双可用区模式下这一步会同时安装 rollout-operator 及其 CRD 和 webhook，这是它唯一新增的集群级资源；单可用区模式不安装。
-5. 应用 PrometheusRule 告警规则。
-6. `GATEWAY_MODE=new` 时应用 otel-gateway 的清单，并等待其就绪。
+4. 部署 `tempo-kafka`、`tempo-rustfs` 及其 Service 和 NetworkPolicy，等待两者就绪。
+5. 删除上一次的初始化 Job 后重新运行：创建 Topic、创建 bucket 并做读写测试，打印 Job 日志。
+6. 执行 `helm upgrade --install tempo`，最长等待 20 分钟。双可用区模式下这一步会同时安装 rollout-operator 及其 CRD 和 webhook，这是它唯一新增的集群级资源；单可用区模式不安装。
+7. 应用 PrometheusRule 告警规则。
+8. `GATEWAY_MODE=new` 时应用 otel-gateway 的清单，并等待其就绪。
 
-**不涉及 Kafka、MinIO、Prometheus、Grafana 和业务服务。**
+**不涉及业务的 Kafka / MinIO、Prometheus、Grafana 和业务服务。**
 
 **[validate.sh](scripts/tempo/validate.sh)：只读验证**
 
@@ -247,16 +230,7 @@ Kafka 只保留 24 小时，live-store 只保存近期数据。block-builder 会
 
 **[rollback.sh](scripts/tempo/rollback.sh)：回滚 Tempo 的 Helm release**
 
-执行 `helm rollback tempo <REVISION>`，执行前要求确认数据格式兼容。只回滚 Helm 管理的资源；Kafka、MinIO、CRD 和 gateway 不会恢复。
-
-**[scripts/kafka/create-topic.sh](scripts/kafka/create-topic.sh)、[grant-acls.sh](scripts/kafka/grant-acls.sh)：修改 Kafka**
-
-在本机使用 Kafka CLI 执行：
-
-- 创建 `tempo-traces` Topic（3 分区、3 副本、保留 24 小时）；
-- 授予 Tempo 用户对该 Topic 的读写权限，以及对 4 个消费组的读取权限。
-
-新版安装手册和交互式脚本已经不再使用这两个脚本，改为用 `kubectl exec` 在 broker Pod 内执行同样的命令。
+执行 `helm rollback tempo <REVISION>`，执行前要求确认数据格式兼容。只回滚 Helm 管理的资源；Kafka、RustFS、CRD 和 gateway 不会恢复。
 
 ### 5.3 [interactive-install.sh](scripts/tempo/interactive-install.sh)：串起整个流程
 
@@ -266,13 +240,12 @@ Kafka 只保留 24 小时，live-store 只保存近期数据。block-builder 会
 |---|---|---|
 | 1 工具 | 检查所需工具是否存在，并请你确认当前集群就是目标集群 | 无 |
 | 2 参数 | 读取 Prometheus CR、helm list、Service、节点和 StorageClass，给出候选项 | 无 |
-| 5a Kafka | Strimzi：创建 `KafkaTopic` + `KafkaUser`。其他部署方式：在 broker Pod 内用 CLI 创建用户、Topic 和 ACL，并可选调大 broker 默认消息大小 | **Kafka**（只新增 Tempo 资源；broker 参数在你确认后才修改） |
-| 5b MinIO | 从 Pod 配置读取 root 账号并取得 CA；用 `mc` 创建 bucket、策略和 `tempo` 用户；做一次写入 / 读取 / 删除测试 | **MinIO**（只新增资源） |
+| 5 存储 | 询问 Tempo 专用 Kafka / RustFS 的 PVC 大小 | 无 |
 | 2.2 Grafana | 建立端口转发，读取已有数据源的 UID | 无 |
-| 3 渲染 | 写入 `environment.local.json` → 调用 render.py → Kafka / MinIO 未启用 TLS 时修改渲染后的 values | 只有本机文件 |
+| 3 渲染 | 写入 `environment.local.json` → 调用 render.py | 只有本机文件 |
 | 4 预检 | 调用 preflight-check.sh | 无 |
-| 6 Secret | 创建 namespace；用 openssl 生成 gateway 的 CA 和证书；创建 3 个 Secret | Tempo namespace |
-| 7 安装 | 调用 install.sh，然后检查日志中是否有 Kafka / MinIO 连接错误 | Tempo namespace |
+| 6 Secret | 创建 namespace；生成 RustFS 访问密钥；用 openssl 生成 gateway 的 CA 和证书；创建 2 个 Secret | Tempo namespace |
+| 7 安装 | 调用 install.sh（部署 Kafka / RustFS、初始化 Topic 与 bucket、安装 Tempo），然后检查日志中的连接错误 | Tempo namespace |
 | 8 抓取 | 显示 Prometheus 的选择器；需要时经你确认后给 Tempo namespace 加标签 | Tempo namespace 的标签 |
 | 9 Remote Write | 检查开关；未开启时先显示 helm diff，确认后执行 upgrade | **Prometheus**（重启一次） |
 | 10 Grafana | 为 sidecar 创建数据源 ConfigMap，或通过 API 创建数据源，然后做健康检查 | **Grafana**（新增一个数据源） |

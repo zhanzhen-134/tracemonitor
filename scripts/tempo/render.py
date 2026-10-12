@@ -61,13 +61,13 @@ def main():
         raise SystemExit('Replace all environment placeholders before rendering')
     if not re.fullmatch(r'[a-z0-9]([-a-z0-9]*[a-z0-9])?', env['TEMPO_NAMESPACE']):
         raise SystemExit('Invalid Kubernetes namespace')
-    if env['KAFKA_SASL_MECHANISM'] not in ['PLAIN', 'SCRAM-SHA-256', 'SCRAM-SHA-512']:
-        raise SystemExit('Select supported PLAIN or SCRAM mechanism; TLS remains enabled')
     if multi_zone and env['ZONE_A'] == env['ZONE_B']:
         raise SystemExit('ZONE_A and ZONE_B must be different availability zones')
-    for key in ['KAFKA_PORT','MINIO_PORT','PROMETHEUS_PORT']:
-        if not isinstance(env[key], int) or not 0 < env[key] < 65536:
-            raise SystemExit(f'{key} must be an integer port')
+    if not isinstance(env['PROMETHEUS_PORT'], int) or not 0 < env['PROMETHEUS_PORT'] < 65536:
+        raise SystemExit('PROMETHEUS_PORT must be an integer port')
+    for key in ['KAFKA_STORAGE_SIZE', 'RUSTFS_STORAGE_SIZE']:
+        if not re.fullmatch(r'[1-9][0-9]*(Gi|Ti)', str(env[key])):
+            raise SystemExit(f'{key} must be a size such as 100Gi or 1Ti')
     files = [ROOT/'charts/tempo/values-production.yaml']
     files += list((ROOT/'manifests').rglob('*.yaml'))
     files += list((ROOT/'integrations').rglob('*.yaml'))

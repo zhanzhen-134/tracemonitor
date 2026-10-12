@@ -1,6 +1,6 @@
 # 安装操作手册
 
-本手册按顺序执行即可完成：Kafka/MinIO 准备 → Tempo 部署 → Collector 接入 → Prometheus 派生指标 → Grafana 数据源 → Java 业务自动注入 → 在 Grafana 查看 Trace 与 Service Graph → ES 日志关联。每一步都给出命令、预期结果和失败时的排查方向，**上一步预期结果未达成时不要进入下一步**。
+本手册按顺序执行即可完成：Tempo 专用 Kafka / RustFS 部署 → Tempo 部署 → Collector 接入 → Prometheus 派生指标 → Grafana 数据源 → Java 业务自动注入 → 在 Grafana 查看 Trace 与 Service Graph → ES 日志关联。每一步都给出命令、预期结果和失败时的排查方向，**上一步预期结果未达成时不要进入下一步**。
 
 不想使用任何仓库脚本、希望每一步都手工执行时，改看 [纯手工安装手册](04b-manual-installation.md)：它只使用清单文件、Chart 包和 kubectl / helm 等标准命令，也不需要 Python。
 
@@ -31,16 +31,14 @@ bash scripts/tempo/interactive-install.sh
 
 - namespace 一律显式指定（`-n`），不依赖 kubeconfig 中的默认 namespace。
 - Helm release 名固定为 `tempo`。
-- 本项目**不安装** Kafka、MinIO、Prometheus、Grafana、Elasticsearch，只对它们做增量配置。手册中的**全部操作都由安装执行人一人完成**，包括这些平台上的配置；对共享平台的变更，按 [11-change-approval.md](11-change-approval.md) 先取得审批单号再执行。
+- Tempo 使用自己专用的 Kafka 和 RustFS（对象存储），与 Tempo 一起部署在 `TEMPO_NAMESPACE` 中，**不使用、也不修改业务现有的 Kafka 和 MinIO**。本项目不安装 Prometheus、Grafana、Elasticsearch，只对它们做增量配置。手册中的**全部操作都由安装执行人一人完成**，包括这些平台上的配置；对共享平台的变更，按 [11-change-approval.md](11-change-approval.md) 先取得审批单号再执行。
 - 文中 `<...>` 表示需要替换为实际值。
 
 ### 执行人需要具备的权限
 
 | 对象 | 需要的权限 | 用于 |
 |---|---|---|
-| Kubernetes | 集群管理员（能创建 namespace、CRD、ClusterRole、Webhook，能 exec 进 Kafka / MinIO Pod，能读 monitoring namespace 的 Secret） | 全部步骤 |
-| Kafka | 管理员 SASL 账号；Strimzi 管理时只需 Kubernetes 权限 | 第 5 步 |
-| MinIO | root 账号（从其 Secret 读取） | 第 5 步 |
+| Kubernetes | 集群管理员（能创建 namespace、CRD、ClusterRole、Webhook，能读 monitoring namespace 的 Secret） | 全部步骤 |
 | Prometheus（kube-prometheus-stack） | 对 `monitoring` namespace 的 Helm release 执行 upgrade | 第 9 步 |
 | Grafana | 服务器管理员账号（kube-prometheus-stack 自带 Grafana 时从 Secret 读取） | 第 2.2、10 步 |
 | Elasticsearch（集群外） | 能修改 index template 的账号，以及 ES 的访问地址 | 第 14 步 |
@@ -68,17 +66,17 @@ kubectl -n monitoring get prometheus -o jsonpath='{.items[0].spec.serviceMonitor
 
 ## 总体步骤
 
-执行顺序：**1 → 2 → 5 → 3 → 4 → 6 → 7 → … → 15**。第 5 步要放在第 3 步之前，因为 Kafka、MinIO 的参数要在第 5 步才能确定。
+按步骤编号顺序执行。
 
 | 步骤 | 内容 | 完成标志 |
 |---|---|---|
 | 1 | 准备运维机工具 | 工具版本满足要求 |
-| 2 | 收集并填写环境参数 | 除 Kafka/MinIO 外的参数已填 |
-| 5 | 在集群内 Kafka 建 Topic/用户/ACL，在 MinIO 建 bucket/账号/策略 | Topic 3 分区 3 副本；Tempo 账号 canary 通过 |
+| 2 | 收集并填写环境参数 | `environment.local.json` 无占位符 |
 | 3 | 渲染与静态检查 | 输出 `Rendered ... workloads` |
 | 4 | 集群预检 | preflight 全部通过 |
-| 6 | Namespace、gateway 证书与 Secret | 3 个 Secret 存在 |
-| 7 | 安装 Tempo 与 Collector | 全部 Pod Ready |
+| 5 | 规划 Tempo 专用的 Kafka 与 RustFS | 确定镜像来源和存储大小 |
+| 6 | Namespace、gateway 证书与 Secret | 2 个 Secret 存在 |
+| 7 | 部署 Kafka / RustFS，安装 Tempo 与 Collector | Topic 与 bucket 已创建，全部 Pod Ready |
 | 8 | Prometheus 抓取与告警规则 | targets UP、规则加载 |
 | 9 | 开启 Prometheus Remote Write 接收 | flag 为 true |
 | 10 | Grafana 注册 Tempo 数据源 | Save & Test 成功 |
@@ -151,10 +149,7 @@ cp environment.example.json environment.local.json
 | `DEMO_NAMESPACE` / `DEMO_IMAGE` | 只接入现有业务、不部署示例应用时，两个都填空字符串 `""`，render 会跳过示例清单；需要示例时见附录 B |
 | `STORAGE_CLASS` | `kubectl get storageclass`，选支持 RWO 的那个 |
 | `ZONE_A` / `ZONE_B` | **可以留空**。两个都留空 `""` 为单可用区模式：live-store 共 3 个，不安装 rollout-operator，节点不需要 zone 标签。只有节点带有 `topology.kubernetes.io/zone` 标签、并且分布在两个真实的故障域时，才填两个不同的值（双可用区模式）。查看：`kubectl get nodes -L topology.kubernetes.io/zone` |
-| `KAFKA_BOOTSTRAP` / `KAFKA_TOPIC` / `KAFKA_SASL_MECHANISM` / `KAFKA_NAMESPACE` / `KAFKA_PORT` | 在第 5.2～5.4 步创建 Topic 和用户时确定；机制只能是 `PLAIN`、`SCRAM-SHA-256`、`SCRAM-SHA-512` |
-| `MINIO_ENDPOINT` / `MINIO_BUCKET` / `MINIO_NAMESPACE` / `MINIO_PORT` | 在第 5.6～5.9 步确定；endpoint 形如 `minio.minio.svc.cluster.local:9000`，不含 `https://` |
-
-Kafka、MinIO 的参数要到第 5 步才能确定，而 render 要求所有参数都已填好。因此**实际顺序是：第 1、2 步 → 第 5 步 → 回到第 3、4 步 → 第 6 步及以后**。
+| `KAFKA_STORAGE_SIZE` / `RUSTFS_STORAGE_SIZE` | Tempo 专用 Kafka、RustFS 的 PVC 大小，默认 `100Gi` / `500Gi`，见第 5 步 |
 | `MONITORING_NAMESPACE` | `kubectl get prometheus -A`，取 Prometheus CR 所在 namespace |
 | `PROMETHEUS_RELEASE` | `helm list -n "$MONITORING_NAMESPACE"`，取 kube-prometheus-stack 的 release 名；ServiceMonitor 会带 `release: <该值>` 标签 |
 | `PROMETHEUS_REMOTE_WRITE_URL` | 见下方 2.1 |
@@ -277,360 +272,27 @@ bash scripts/tempo/preflight-check.sh
 | CRD 不存在 | 集群未安装 Prometheus Operator（kube-prometheus-stack 会带上）；确认 `helm list -n monitoring` 中的 release 状态 |
 | `auth can-i` 为 `no` | 当前 kubeconfig 用户权限不足，申请权限 |
 
-## 5. 准备 Kafka 与 MinIO
-
-Kafka 和 MinIO 都运行在本集群内。下面的命令通过 `kubectl exec` 在它们自己的 Pod 里执行，运维机**不需要**安装 Kafka CLI 或 `mc`。先导出两个 namespace：
-
-```bash
-export KAFKA_NAMESPACE='<Kafka 所在 namespace>'
-export MINIO_NAMESPACE='<MinIO 所在 namespace>'
-mkdir -p build/secrets && chmod 700 build/secrets     # 存放 CA 和凭据，build/ 已被 Git 忽略
-```
-
-### 5.1 识别 Kafka 部署方式
-
-```bash
-kubectl get crd kafkas.kafka.strimzi.io 2>/dev/null && kubectl -n "$KAFKA_NAMESPACE" get kafka
-kubectl -n "$KAFKA_NAMESPACE" get pods,svc
-```
-
-- 第一条有输出：Kafka 由 **Strimzi** 管理，按 5.2 执行。Strimzi 会接管 Topic、用户和 ACL，必须通过它的 CR 创建，用 CLI 创建的可能被它覆盖或删除。
-- 第一条没有输出（例如 Bitnami Chart 或自建 StatefulSet）：跳过 5.2，按 5.3 执行。
-
-Tempo 默认要求 **TLS + SASL**（PLAIN 或 SCRAM）。如果现有 Kafka 只有明文监听器，见 5.4。
-
-### 5.2 Kafka：Strimzi 方式
-
-**① 确认有 TLS + SCRAM 监听器**
-
-```bash
-export KAFKA_CLUSTER=$(kubectl -n "$KAFKA_NAMESPACE" get kafka -o jsonpath='{.items[0].metadata.name}')
-kubectl -n "$KAFKA_NAMESPACE" get kafka "$KAFKA_CLUSTER" \
-  -o jsonpath='{range .spec.kafka.listeners[*]}{.name}{" port="}{.port}{" tls="}{.tls}{" auth="}{.authentication.type}{"\n"}{end}'
-kubectl -n "$KAFKA_NAMESPACE" get kafka "$KAFKA_CLUSTER" -o jsonpath='{.spec.kafka.authorization.type}'; echo
-```
-
-需要一个 `tls=true auth=scram-sha-512` 的 internal 监听器（通常端口 9093），并且 authorization 为 `simple`。
-
-如果没有这样的监听器，需要在 Kafka CR 的 `spec.kafka.listeners` 中增加：
-
-```yaml
-- name: tlsscram
-  port: 9094
-  type: internal
-  tls: true
-  authentication:
-    type: scram-sha-512
-```
-
-如果 authorization 为空，还要加 `spec.kafka.authorization: {type: simple}`。然后执行 `kubectl -n "$KAFKA_NAMESPACE" edit kafka "$KAFKA_CLUSTER"`。这会**滚动重启所有 broker**，应在低峰执行，并用 `kubectl -n "$KAFKA_NAMESPACE" get pods -w` 等待全部恢复 Running。
-
-注意：开启 `simple` 授权后，**现有没有 ACL 的客户端会被拒绝访问**。如果现有 Kafka 没有开启授权，先确认现有业务的影响，或把 `superUsers` 设置好再开启。
-
-**② 记录参数**
-
-`environment.local.json` 中：
-
-- `KAFKA_BOOTSTRAP` = `<KAFKA_CLUSTER>-kafka-bootstrap.<KAFKA_NAMESPACE>.svc.cluster.local:<监听器端口>`
-- `KAFKA_PORT` = 监听器端口
-- `KAFKA_SASL_MECHANISM` = `SCRAM-SHA-512`
-- `KAFKA_TOPIC` = `tempo-traces`
-- `KAFKA_NAMESPACE` = `$KAFKA_NAMESPACE`
-
-**③ 创建 Topic 和用户（含 ACL）**
-
-把 `<...>` 替换为实际值后保存为 `build/secrets/kafka-tempo.yaml`：
-
-```yaml
-apiVersion: kafka.strimzi.io/v1beta2
-kind: KafkaTopic
-metadata:
-  name: tempo-traces
-  namespace: <KAFKA_NAMESPACE>
-  labels:
-    strimzi.io/cluster: <KAFKA_CLUSTER>
-spec:
-  partitions: 3
-  replicas: 3
-  config:
-    min.insync.replicas: 2
-    retention.ms: 86400000
-    cleanup.policy: delete
-    max.message.bytes: 16000000
----
-apiVersion: kafka.strimzi.io/v1beta2
-kind: KafkaUser
-metadata:
-  name: tempo
-  namespace: <KAFKA_NAMESPACE>
-  labels:
-    strimzi.io/cluster: <KAFKA_CLUSTER>
-spec:
-  authentication:
-    type: scram-sha-512
-  authorization:
-    type: simple
-    acls:
-    - resource: {type: topic, name: tempo-traces, patternType: literal}
-      operations: [Read, Write, Describe]
-    - resource: {type: group, name: block-builder, patternType: literal}
-      operations: [Read, Describe]
-    - resource: {type: group, name: metrics-generator, patternType: literal}
-      operations: [Read, Describe]
-    - resource: {type: group, name: tempo-live-store, patternType: literal}   # 双可用区模式：改为 tempo-live-store-zone-a、tempo-live-store-zone-b 两条
-      operations: [Read, Describe]
-```
-
-```bash
-kubectl apply --dry-run=server -f build/secrets/kafka-tempo.yaml
-kubectl apply -f build/secrets/kafka-tempo.yaml
-kubectl -n "$KAFKA_NAMESPACE" wait kafkatopic/tempo-traces kafkauser/tempo --for=condition=Ready --timeout=3m
-```
-
-Strimzi 要求 broker 数至少为 3，才能满足 `replicas: 3`。用 `kubectl -n "$KAFKA_NAMESPACE" get pods -l strimzi.io/kind=Kafka` 确认 broker 数量。
-
-**④ 取出凭据和 CA**
-
-```bash
-echo "KAFKA_USERNAME=tempo"                                                     >  build/secrets/credentials.env
-echo "KAFKA_PASSWORD=$(kubectl -n "$KAFKA_NAMESPACE" get secret tempo -o jsonpath='{.data.password}' | base64 -d)" >> build/secrets/credentials.env
-kubectl -n "$KAFKA_NAMESPACE" get secret "$KAFKA_CLUSTER-cluster-ca-cert" -o jsonpath='{.data.ca\.crt}' | base64 -d > build/secrets/kafka-ca.crt
-chmod 600 build/secrets/*
-```
-
-完成后跳到 5.5。
-
-### 5.3 Kafka：非 Strimzi（Bitnami / 自建）
-
-**① 找到 broker Pod 和监听器**
-
-```bash
-export KAFKA_POD=$(kubectl -n "$KAFKA_NAMESPACE" get pods -o name | grep -iE 'kafka-(controller|broker)?-?0$|kafka-0$' | head -1)
-echo "$KAFKA_POD"
-kubectl -n "$KAFKA_NAMESPACE" exec "$KAFKA_POD" -- sh -c 'env | grep -iE "LISTENERS|SASL|SECURITY_PROTOCOL"; ls /opt/bitnami/kafka/config 2>/dev/null'
-```
-
-从输出中找到协议为 `SASL_SSL` 的监听器及其端口；CLI 在 Bitnami 镜像中位于 `/opt/bitnami/kafka/bin/`，Apache 官方镜像中位于 `/opt/kafka/bin/`。下文用 `$KBIN` 表示：
-
-```bash
-export KBIN=/opt/bitnami/kafka/bin     # 或 /opt/kafka/bin
-```
-
-**② 准备管理员客户端配置**
-
-管理员账号是安装 Kafka 时设置的 SASL 用户。Bitnami 的账号密码通常在 `<release>-user-passwords` Secret 中，可以用 `kubectl -n "$KAFKA_NAMESPACE" get secret` 查找。
-
-在 Pod 内写入临时配置（只存在于 `/tmp`，用完删除）：
-
-```bash
-kubectl -n "$KAFKA_NAMESPACE" exec -i "$KAFKA_POD" -- sh -c 'umask 077; cat > /tmp/admin.properties' <<'EOF'
-security.protocol=SASL_SSL
-sasl.mechanism=SCRAM-SHA-512
-sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="<管理员用户>" password="<管理员密码>";
-ssl.truststore.type=PEM
-ssl.truststore.location=<Pod 内 CA 文件路径，如 /opt/bitnami/kafka/config/certs/kafka.truststore.pem>
-EOF
-export KAFKA_BOOTSTRAP_IN_POD='<broker 的 SASL_SSL 监听器 host:port>'
-kx() { kubectl -n "$KAFKA_NAMESPACE" exec "$KAFKA_POD" -- "$@"; }
-kx "$KBIN/kafka-topics.sh" --bootstrap-server "$KAFKA_BOOTSTRAP_IN_POD" --command-config /tmp/admin.properties --list
-```
-
-最后一条能列出 Topic，说明管理员连接正常。
-
-**③ 检查 broker 消息大小上限**
-
-```bash
-kx "$KBIN/kafka-configs.sh" --bootstrap-server "$KAFKA_BOOTSTRAP_IN_POD" --command-config /tmp/admin.properties \
-  --describe --entity-type brokers --entity-default --all | grep -E 'message.max.bytes|replica.fetch.max.bytes'
-```
-
-两项都 ≥ `16000000` 才能直接使用。否则先执行下面的命令调大，对全部 broker 生效，不需要重启：
-
-```bash
-kx "$KBIN/kafka-configs.sh" --bootstrap-server "$KAFKA_BOOTSTRAP_IN_POD" --command-config /tmp/admin.properties \
-  --alter --entity-type brokers --entity-default --add-config message.max.bytes=16000000,replica.fetch.max.bytes=16000000
-```
-
-**④ 创建 Tempo 用户（SCRAM）**
-
-```bash
-export KAFKA_TEMPO_PASSWORD="$(openssl rand -base64 24 | tr -d '/+=')"
-kx "$KBIN/kafka-configs.sh" --bootstrap-server "$KAFKA_BOOTSTRAP_IN_POD" --command-config /tmp/admin.properties \
-  --alter --entity-type users --entity-name tempo --add-config "SCRAM-SHA-512=[password=$KAFKA_TEMPO_PASSWORD]"
-```
-
-使用 PLAIN 机制的 Kafka 无法用命令动态创建用户，需要在 broker 的 JAAS 配置中增加 tempo 用户，然后滚动重启 broker。
-
-**⑤ 创建 Topic 和 ACL**
-
-```bash
-kx "$KBIN/kafka-topics.sh" --bootstrap-server "$KAFKA_BOOTSTRAP_IN_POD" --command-config /tmp/admin.properties \
-  --create --topic tempo-traces --partitions 3 --replication-factor 3 \
-  --config min.insync.replicas=2 --config retention.ms=86400000 \
-  --config cleanup.policy=delete --config max.message.bytes=16000000
-
-kx "$KBIN/kafka-acls.sh" --bootstrap-server "$KAFKA_BOOTSTRAP_IN_POD" --command-config /tmp/admin.properties \
-  --add --allow-principal User:tempo --operation Read --operation Write --operation Describe --topic tempo-traces
-for g in block-builder metrics-generator tempo-live-store; do   # 双可用区模式：tempo-live-store 换成 tempo-live-store-zone-a tempo-live-store-zone-b
-  kx "$KBIN/kafka-acls.sh" --bootstrap-server "$KAFKA_BOOTSTRAP_IN_POD" --command-config /tmp/admin.properties \
-    --add --allow-principal User:tempo --operation Read --operation Describe --group "$g"
-done
-```
-
-如果 Kafka 没有开启授权（没有配置 `authorizer.class.name`），ACL 命令会报错，可以跳过 ACL；此时任何认证用户都能访问该 Topic。
-
-**⑥ 取出凭据和 CA，记录参数**
-
-```bash
-echo "KAFKA_USERNAME=tempo"                  >  build/secrets/credentials.env
-echo "KAFKA_PASSWORD=$KAFKA_TEMPO_PASSWORD"  >> build/secrets/credentials.env
-kubectl -n "$KAFKA_NAMESPACE" exec "$KAFKA_POD" -- cat '<Pod 内 CA 文件路径>' > build/secrets/kafka-ca.crt
-chmod 600 build/secrets/*
-```
-
-`environment.local.json` 中：
-
-- `KAFKA_BOOTSTRAP`：`<Kafka Service 名>.<KAFKA_NAMESPACE>.svc.cluster.local:<SASL_SSL 端口>`
-- `KAFKA_PORT`：broker 的 SASL_SSL **容器端口**
-- `KAFKA_SASL_MECHANISM`：`SCRAM-SHA-512`
-- `KAFKA_TOPIC`：`tempo-traces`
-- `KAFKA_NAMESPACE`：Kafka 所在 namespace
-
-### 5.4 Kafka 只有明文监听器时
-
-Tempo 默认开启 Kafka TLS，有两种处理方式：
-
-1. **推荐**：按 5.2 ① 或 broker 配置，增加 SASL_SSL 监听器。
-2. 集群内明文（需评估安全基线）：编辑 [charts/tempo/values-production.yaml](../../charts/tempo/values-production.yaml) 的 `tempo.structuredConfig.ingest.kafka`，将 `tls_enabled` 改为 `false`，并删除 `tls_ca_path` 一行。
-   - 如果连 SASL 也没有，`KAFKA_SASL_MECHANISM` 填 `PLAIN`，`credentials.env` 中 `KAFKA_USERNAME=`、`KAFKA_PASSWORD=` 都留空。
-   - 创建 `tempo-ca` 时用任意 PEM 占位，例如 `cp build/secrets/minio-ca.crt build/secrets/kafka-ca.crt`。
-
-### 5.5 Kafka 验证
-
-```bash
-# Strimzi
-kubectl -n "$KAFKA_NAMESPACE" get kafkatopic tempo-traces -o jsonpath='{.status.conditions[0].type}{" partitions="}{.spec.partitions}{"\n"}'
-# 非 Strimzi
-kx "$KBIN/kafka-topics.sh" --bootstrap-server "$KAFKA_BOOTSTRAP_IN_POD" --command-config /tmp/admin.properties --describe --topic tempo-traces
-kx rm -f /tmp/admin.properties     # 验证完成后删除 Pod 内的管理员配置
-```
-
-**预期**：3 个分区，每个分区 3 个副本，Isr 至少包含 2 个副本。Tempo 账号能否连通，由第 7 步 Tempo 启动日志验证；认证失败时会出现 `SASL authentication failed`。
-
-### 5.6 识别 MinIO 并取得管理员凭据
-
-```bash
-kubectl -n "$MINIO_NAMESPACE" get pods,svc
-export MINIO_POD=$(kubectl -n "$MINIO_NAMESPACE" get pods -o name | grep -i minio | grep -v console | head -1)
-kubectl -n "$MINIO_NAMESPACE" get pod "${MINIO_POD#pod/}" -o jsonpath='{range .spec.containers[0].env[*]}{.name}{"="}{.valueFrom.secretKeyRef.name}{"/"}{.valueFrom.secretKeyRef.key}{"\n"}{end}' | grep -iE 'ROOT|ACCESS|SECRET'
-```
-
-输出会指出 root 用户和密码所在的 Secret 与 key。常见位置：
-
-- Bitnami：`<release>` Secret 的 `root-user` / `root-password`
-- 官方 Chart：`<release>` Secret 的 `rootUser` / `rootPassword`
-- MinIO Operator：Tenant 的 env configuration Secret
-
-```bash
-export MINIO_ROOT_USER=$(kubectl -n "$MINIO_NAMESPACE" get secret '<Secret 名>' -o jsonpath='{.data.<用户 key>}' | base64 -d)
-export MINIO_ROOT_PASSWORD=$(kubectl -n "$MINIO_NAMESPACE" get secret '<Secret 名>' -o jsonpath='{.data.<密码 key>}' | base64 -d)
-```
-
-确认 S3 API 端口和是否启用 TLS：
-
-```bash
-kubectl -n "$MINIO_NAMESPACE" get svc -o wide          # 找 S3 API 的 Service（端口通常为 9000）
-kubectl -n "$MINIO_NAMESPACE" exec "$MINIO_POD" -- sh -c 'ls /etc/minio/certs /opt/bitnami/minio/certs 2>/dev/null'
-```
-
-证书目录中有 `public.crt` 说明启用了 TLS。
-
-### 5.7 取得 MinIO CA
-
-```bash
-# 证书目录中有 CAs/ 时优先取 CA；没有时取 public.crt（自签证书本身即 CA）
-kubectl -n "$MINIO_NAMESPACE" exec "$MINIO_POD" -- sh -c 'cat /etc/minio/certs/CAs/*.crt 2>/dev/null || cat /etc/minio/certs/public.crt' > build/secrets/minio-ca.crt
-chmod 600 build/secrets/minio-ca.crt
-openssl x509 -in build/secrets/minio-ca.crt -noout -subject -enddate
-```
-
-MinIO 证书的 SAN 必须包含 Tempo 将要使用的主机名，即 `MINIO_ENDPOINT` 中的 Service DNS 名。用下面的命令检查：
-
-```bash
-kubectl -n "$MINIO_NAMESPACE" exec "$MINIO_POD" -- cat /etc/minio/certs/public.crt | openssl x509 -noout -ext subjectAltName
-```
-
-**MinIO 未启用 TLS 时**：
-
-- 编辑 [charts/tempo/values-production.yaml](../../charts/tempo/values-production.yaml) 的 `storage.trace.s3`，把 `insecure` 改为 `true`，并删除 `tls_ca_path` 一行。
-- 创建 `tempo-ca` 时，`minio-ca.crt` 用任意 PEM 占位，例如 `cp build/secrets/kafka-ca.crt build/secrets/minio-ca.crt`。
-
-### 5.8 MinIO：创建 bucket、账号与策略
-
-在 MinIO Pod 内使用镜像自带的 `mc`。配置写在 `/tmp`，用完删除：
-
-```bash
-mx() { kubectl -n "$MINIO_NAMESPACE" exec -i "$MINIO_POD" -- env MC_CONFIG_DIR=/tmp/.mc "$@"; }
-export MINIO_HOST='<S3 Service 名>.<MINIO_NAMESPACE>.svc.cluster.local:9000'
-export MINIO_SCHEME=https     # 未启用 TLS 时为 http
-
-# 让 mc 信任 CA（未启用 TLS 时跳过）
-kubectl -n "$MINIO_NAMESPACE" exec -i "$MINIO_POD" -- sh -c 'mkdir -p /tmp/.mc/certs/CAs && cat > /tmp/.mc/certs/CAs/ca.crt' < build/secrets/minio-ca.crt
-
-mx mc alias set admin "$MINIO_SCHEME://$MINIO_HOST" "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"
-mx mc admin info admin
-```
-
-**预期**：`mc admin info` 显示服务器状态为 online。
-
-```bash
-# bucket
-mx mc mb --ignore-existing admin/tempo-traces
-# 策略（render 已把 bucket 名填入）
-sed 's/<MINIO_BUCKET>/tempo-traces/g' integrations/minio/policy.json \
-  | kubectl -n "$MINIO_NAMESPACE" exec -i "$MINIO_POD" -- sh -c 'cat > /tmp/tempo-policy.json'
-mx mc admin policy create admin tempo-rw /tmp/tempo-policy.json
-# 用户
-export MINIO_TEMPO_SECRET="$(openssl rand -base64 30 | tr -d '/+=')"
-mx mc admin user add admin tempo "$MINIO_TEMPO_SECRET"
-mx mc admin policy attach admin tempo-rw --user tempo
-```
-
-- 较老的 `mc` 没有 `policy create` / `policy attach` 子命令，对应改用 `mc admin policy add admin tempo-rw <文件>` 和 `mc admin policy set admin tempo-rw user=tempo`。
-- 策略只允许访问 `tempo-traces` 这一个 bucket；参数文件中的 `MINIO_BUCKET` 也要填 `tempo-traces`。
-
-### 5.9 MinIO：用 Tempo 账号做 canary
-
-```bash
-mx mc alias set tempo "$MINIO_SCHEME://$MINIO_HOST" tempo "$MINIO_TEMPO_SECRET"
-mx sh -c 'echo tempo-probe > /tmp/probe.txt'
-mx mc cp /tmp/probe.txt tempo/tempo-traces/_acceptance/probe.txt
-mx mc cat tempo/tempo-traces/_acceptance/probe.txt
-mx mc rm tempo/tempo-traces/_acceptance/probe.txt
-mx mc ls tempo/                       # 只能看到 tempo-traces，看不到其他 bucket 的内容
-```
-
-**预期**：PUT、GET、DELETE 全部成功。
-
-收尾：
-
-```bash
-echo "MINIO_ACCESS_KEY=tempo"                >> build/secrets/credentials.env
-echo "MINIO_SECRET_KEY=$MINIO_TEMPO_SECRET"  >> build/secrets/credentials.env
-chmod 600 build/secrets/credentials.env
-mx rm -rf /tmp/.mc /tmp/tempo-policy.json /tmp/probe.txt
-```
-
-`environment.local.json` 中：
-
-- `MINIO_ENDPOINT`：`$MINIO_HOST` 的值，不含 `https://`
-- `MINIO_BUCKET`：`tempo-traces`
-- `MINIO_PORT`：MinIO 的 S3 **容器端口**，通常为 `9000`
-- `MINIO_NAMESPACE`：MinIO 所在 namespace
-
-### 5.10 回到第 3 步重新渲染
-
-Kafka、MinIO 参数确定后，执行 `python3 scripts/tempo/render.py environment.local.json`，再继续第 6 步。
+## 5. 规划 Tempo 专用的 Kafka 与 RustFS
+
+Tempo 不使用业务现有的 Kafka 和 MinIO，而是在 `TEMPO_NAMESPACE` 中单独部署一套。清单在 `manifests/kafka/` 和 `manifests/rustfs/`，第 7 步由 `install.sh` 自动部署并初始化，这一步只需要确认下面几项。
+
+| 组件 | 部署形态 | 用途 |
+|---|---|---|
+| `tempo-kafka` | StatefulSet 1 个 Pod，`apache/kafka:4.3.1`（KRaft 单节点），PVC `KAFKA_STORAGE_SIZE`，Service `tempo-kafka:9092` | 写入缓冲。Topic `tempo-traces`：3 分区、1 副本、保留 24 小时、每个分区最多 28GB |
+| `tempo-rustfs` | StatefulSet 1 个 Pod，`rustfs/rustfs:1.0.0`（单节点单盘），PVC `RUSTFS_STORAGE_SIZE`，Service `tempo-rustfs:9000`（S3）/ `9001`（控制台） | 长期存储，bucket `tempo-traces`，保存 30 天 |
+| `tempo-kafka-create-topic` | 一次性 Job，`apache/kafka:4.3.1` | 创建 Topic |
+| `tempo-rustfs-create-bucket` | 一次性 Job，`amazon/aws-cli:2.37.4` | 创建 bucket，并用 Tempo 的密钥做写入 / 读取 / 删除测试 |
+
+需要确认的事项：
+
+1. **镜像能否拉取**。集群访问不了 Docker Hub 时，先把上面三个镜像同步到企业镜像仓库，并修改 `manifests/kafka/`、`manifests/rustfs/` 中的 `image:`，然后重新 render。
+2. **存储大小**：
+   - Kafka 保留 24 小时且每个分区最多 28GB（共约 84GB），所以 `KAFKA_STORAGE_SIZE` 不能小于 `100Gi`。要用更小的 PVC，需同时调小 `manifests/kafka/statefulset.yaml` 中的 `KAFKA_LOG_RETENTION_BYTES` 和 `job-create-topic.yaml` 中的 `retention.bytes`。
+   - RustFS 保存 30 天的 trace，按 [03-capacity-planning.md](03-capacity-planning.md) 估算，初期可先用 `500Gi`。
+   - 使用 `local-path` 时，确认节点本地盘有足够空间。
+3. **单节点的影响**：Kafka Pod 重启或所在节点故障期间，Tempo 无法写入新数据。otel-gateway 会缓存并重试最多 5 分钟，超过后丢弃。已写入 Kafka 和 RustFS 的数据保存在 PVC 中，不会丢失。
+
+**安全**：Kafka 和 RustFS 只在集群内访问，不开启 TLS 和 Kafka 认证。各自的 NetworkPolicy 只允许 Tempo 的 Pod 和初始化 Job 访问；RustFS 使用第 6 步生成的密钥。
 
 ## 6. 准备 Namespace、证书与 Secret
 
@@ -665,36 +327,39 @@ cd ../..
 
 `otel-ca.key` 用于以后签发客户端证书（附录 B 示例应用会用到），妥善保管。证书到期前需要重新签发，并重启 gateway。
 
-### 6.3 创建 Secret
+### 6.3 生成 RustFS 访问密钥并创建 Secret
+
+RustFS 的 root 密钥同时也是 Tempo 访问它的密钥。这个 RustFS 只给 Tempo 用，所以不另外创建子账号。
 
 ```bash
+( umask 077
+  printf 'RUSTFS_ACCESS_KEY=tempo-%s\nRUSTFS_SECRET_KEY=%s\n' \
+    "$(openssl rand -hex 4)" "$(openssl rand -base64 30 | tr -d '/+=')" > build/secrets/credentials.env )
+
 kubectl -n "$TEMPO_NAMESPACE" create secret generic tempo-credentials \
   --from-env-file=build/secrets/credentials.env
-
-kubectl -n "$TEMPO_NAMESPACE" create secret generic tempo-ca \
-  --from-file=kafka-ca.crt=build/secrets/kafka-ca.crt \
-  --from-file=minio-ca.crt=build/secrets/minio-ca.crt
 
 kubectl -n "$TEMPO_NAMESPACE" create secret generic otel-gateway-tls \
   --from-file=ca.crt=build/secrets/otel-ca.crt \
   --from-file=tls.crt=build/secrets/otel-server.crt \
   --from-file=tls.key=build/secrets/otel-server.key
 
-kubectl -n "$TEMPO_NAMESPACE" get secret tempo-credentials tempo-ca otel-gateway-tls
+kubectl -n "$TEMPO_NAMESPACE" describe secret tempo-credentials otel-gateway-tls | grep -E '^Name:|bytes'
 ```
 
-**预期**：三个 Secret 均存在。`tempo-credentials` 应包含 4 个 key：`KAFKA_USERNAME`、`KAFKA_PASSWORD`、`MINIO_ACCESS_KEY`、`MINIO_SECRET_KEY`。可以用下面的命令确认：
+**预期**：
 
-```bash
-kubectl -n "$TEMPO_NAMESPACE" get secret tempo-credentials -o jsonpath='{.data}' | python3 -c 'import json,sys; print(sorted(json.load(sys.stdin)))'
-```
+- `tempo-credentials` 有 2 个 key：`RUSTFS_ACCESS_KEY`、`RUSTFS_SECRET_KEY`。
+- `otel-gateway-tls` 有 3 个 key。
+
+把两个 RustFS 密钥保存到企业密钥系统，登录 RustFS 控制台时也要用到。以后要更换密钥，必须同时更新 Secret，并重启 `tempo-rustfs` 和所有 Tempo 组件。
 
 说明：
 
 - otel-gateway 开放两类入口：4317/4318 为 mTLS，4319 为集群内明文 OTLP/HTTP，供 Operator 注入的 Java agent 使用（第 11 步）。
 - `build/secrets/` 中的文件是明文凭据。全部步骤完成后，把 CA 私钥等需要长期保存的文件转存到企业密钥系统，然后删除该目录。
 
-## 7. 安装 Tempo 与 Collector
+## 7. 部署 Kafka / RustFS，安装 Tempo 与 Collector
 
 ```bash
 export CHANGE_APPROVAL_ID='<审批单号>'
@@ -702,7 +367,26 @@ export GATEWAY_MODE='new'      # 新建 otel-gateway；已有可复用的 Gatewa
 bash scripts/tempo/install.sh
 ```
 
-`install.sh` 依次执行：校验 build 产物 → 检查 Secret → 部署 Tempo NetworkPolicy → `helm upgrade --install tempo`（`--wait`，最长 20 分钟）→ 部署 PrometheusRule →（`new` 模式）部署 otel-gateway。它**不会**创建 Kafka/MinIO、修改 Prometheus 或 Grafana。
+`install.sh` 依次执行：
+
+1. 校验 build 产物，检查 Secret。
+2. 部署 Tempo 的 NetworkPolicy。
+3. 部署 `tempo-kafka`、`tempo-rustfs` 及其 NetworkPolicy，等待两者就绪。
+4. 运行两个初始化 Job（创建 Topic、创建 bucket 并做读写测试），打印 Job 日志。
+5. `helm upgrade --install tempo`（`--wait`，最长 20 分钟）。
+6. 部署 PrometheusRule。
+7. `new` 模式下部署 otel-gateway。
+
+它**不会**修改业务的 Kafka / MinIO、Prometheus 或 Grafana。
+
+确认 Topic 和 bucket：
+
+```bash
+kubectl -n "$TEMPO_NAMESPACE" logs job/tempo-kafka-create-topic | tail -n 4     # PartitionCount: 3 ReplicationFactor: 1
+kubectl -n "$TEMPO_NAMESPACE" logs job/tempo-rustfs-create-bucket | tail -n 1   # bucket tempo-traces ready: PUT/GET/DELETE ok
+```
+
+需要查看 RustFS 中的数据时：`kubectl -n "$TEMPO_NAMESPACE" port-forward svc/tempo-rustfs 9001:9001`，浏览器访问 `http://127.0.0.1:9001`，用 6.3 的密钥登录。
 
 验证：
 
@@ -720,7 +404,9 @@ kubectl -n "$TEMPO_NAMESPACE" get statefulset tempo-metrics-generator
 | 失败现象 | 排查方向 |
 |---|---|
 | Pod `Pending` | `kubectl describe pod`：资源不足、StorageClass 不对；双可用区模式下还可能是 zone 标签与 ZONE_A / ZONE_B 不匹配 |
-| Pod `CrashLoopBackOff` | `kubectl logs <pod> --previous`：Kafka SASL/TLS、MinIO 证书/权限 |
+| Pod `CrashLoopBackOff` | `kubectl logs <pod> --previous`：连不上 `tempo-kafka` 时检查 Kafka Pod 与 NetworkPolicy；`AccessDenied` / `NoSuchBucket` 说明 RustFS 密钥不一致或 bucket 未创建 |
+| `tempo-kafka-0` / `tempo-rustfs-0` 不就绪 | `kubectl describe pod`、`kubectl logs`：StorageClass、磁盘空间、镜像拉取；Kafka 日志出现 `Invalid cluster.id` 说明 PVC 中残留了以前的数据 |
+| 初始化 Job 不完成 | `kubectl logs job/<名称>`：Kafka / RustFS 未就绪时 Job 会自动重试；重新运行前先 `kubectl delete job <名称>` |
 | Live Store 长时间不 Ready | Kafka 消费 lag 未追平，见 [07-troubleshooting.md](07-troubleshooting.md) |
 | Helm 报 CRD 无匹配资源（仅双可用区模式） | 先单独安装包内 rollout-operator CRD：`tar -xzf charts/tempo/tempo-distributed-3.11.1.tgz -C build/ && kubectl apply --server-side -f build/tempo-distributed/charts/rollout-operator/charts/crds/crds/`，然后在 values 中设 `rollout_operator.crds.enabled=false`，重新 render 并再次执行 install.sh |
 
@@ -1065,7 +751,7 @@ sum by (service) (rate(traces_spanmetrics_calls_total[5m]))
 |---|---|
 | receiver 是否开启 | 重复 9.1 |
 | generator 是否推送报错 | 重复 9.3 |
-| generator 是否在消费 Kafka | `kubectl -n "$TEMPO_NAMESPACE" logs statefulset/tempo-metrics-generator --since=10m` 中无 Kafka 认证或 ACL 错误；ACL 包含 `metrics-generator` 消费组 |
+| generator 是否在消费 Kafka | `kubectl -n "$TEMPO_NAMESPACE" logs statefulset/tempo-metrics-generator --since=10m` 中无连接 `tempo-kafka` 的错误 |
 | processors 是否生效 | `grep -n -A3 'processors:' build/tempo-rendered.yaml` 包含 `service-graphs` |
 | 流量是否在 Remote Write 开启前产生 | 旧样本不会补发，重新产生流量即可 |
 | 只有 span metrics、没有 service graph | 边需要调用双方**都已注入**：只注入了调用方时，下游没有 SERVER span，配不成边。数据库、Redis 等例外，会根据 CLIENT span 显示为虚拟节点 |
@@ -1244,7 +930,7 @@ Grafana → Connections → Data sources → Elasticsearch → Data links → Ad
 
 ## 15. 全链验收与压测
 
-- 按 [06-validation.md](06-validation.md) 执行全部检查并保存证据，包括后端存储（MinIO）查询、告警规则、受限 namespace 访问被拒等。
+- 按 [06-validation.md](06-validation.md) 执行全部检查并保存证据，包括后端存储（RustFS）查询、告警规则、受限 namespace 访问被拒等。
 - 按 [03-capacity-planning.md](03-capacity-planning.md) 和 [09-operations-runbook.md](09-operations-runbook.md)，在低风险窗口完成压测和故障演练。
 - 首次看到 trace 和 Service Graph 只说明基本链路可用，不代表生产验收通过。
 

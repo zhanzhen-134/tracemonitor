@@ -25,12 +25,12 @@
 ## 尚待目标环境执行
 
 - 真实 K8s 版本/CRD admission/CNI/PodSecurity/StorageClass 验证，rollout webhook 控制面可达性。
-- Linux Tempo 3.1.0 全部 target 实际启动和配置解析、Kafka SCRAM/TLS/ACL、S3 证书/权限。
+- Linux Tempo 3.1.0 全部 target 实际启动和配置解析、专用 Kafka / RustFS 在目标集群的实际启动、Topic 与 bucket 初始化 Job。
 - SDK→Collector mTLS、内部受限明文链路安全基线评审、未知/非授权客户端阻断测试。
 - 真实 Trace ID 的近期查询和 Querier backend-only 查询；Grafana Service Map、Exemplar、ES 双向关联。
-- Prometheus receiver/selector/指标单位、告警触发恢复、现有 Kafka/MinIO 平台告警覆盖。
-- 目标流量压测、单区故障、Kafka/MinIO/Remote Write 故障、恢复时间及丢失统计。
-- 现有 Grafana/Prometheus/ELK/Kafka 版本与参数、镜像扫描和企业供应链审批。
+- Prometheus receiver/selector/指标单位、告警触发恢复、专用 Kafka / RustFS 的磁盘与可用性告警（当前未提供 exporter）。
+- 目标流量压测、单区故障、Kafka / RustFS / Remote Write 故障、恢复时间及丢失统计。
+- 现有 Grafana/Prometheus/ELK 版本与参数、镜像扫描和企业供应链审批。
 
 以上验证使用 `.cache/smoke.json` 中的虚构示例地址生成本地 `build/`。为避免将测试渲染当作实际部署，最终移除了 build/render-mode.txt 成功标记；填写真实 environment.local.json 并重新 render 才能执行安装脚本。
 

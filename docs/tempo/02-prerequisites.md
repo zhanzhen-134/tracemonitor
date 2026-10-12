@@ -8,12 +8,8 @@
 | K8s 版本、CNI、metrics-server | Chart 声明 >=1.25；仍需服务端 dry-run、NetworkPolicy 实际阻断测试和 HPA 指标测试 |
 | STORAGE_CLASS | 支持 RWO、跨节点重挂载；跨区 PVC 不会自动变成异地副本；核验 reclaimPolicy/扩容 |
 | ZONE_A / ZONE_B | 可选。都留空为单可用区模式（默认，节点不需要 zone 标签，live-store 3 个，不装 rollout-operator）；都填写时为双可用区模式，必须是真实且不同的 topology.kubernetes.io/zone 标签，由 `charts/tempo/values-multi-zone.yaml` 开启跨区复制 |
-| Kafka 版本、broker 数、磁盘 | 至少 3 broker 才能使用 RF=3；固定平台 CLI 版本；与 Tempo 3.1.0 联调 |
-| KAFKA_BOOTSTRAP / TOPIC | bootstrap 为 host:port；网络须覆盖全部 advertised.listeners；独立 Topic |
-| KAFKA_SASL_MECHANISM | PLAIN、SCRAM-SHA-256、SCRAM-SHA-512；默认启用 TLS；凭据不写 JSON |
-| KAFKA_NAMESPACE / PORT | 集群内 Kafka broker Pod 所在 namespace 与 broker **容器端口**（NetworkPolicy 按 DNAT 后的 Pod 端口匹配）；Tempo 出口按 namespace 放行 |
-| MINIO_ENDPOINT / BUCKET | endpoint 不含 https://，含端口；独立 bucket；TLS SAN 与主机名匹配 |
-| MINIO_NAMESPACE / PORT | 集群内 MinIO Pod 所在 namespace 与 S3 API **容器端口**；Tempo 出口按 namespace 放行 |
+| Kafka / 对象存储 | 不使用业务现有的 Kafka / MinIO。Tempo 专用的单节点 Kafka（`apache/kafka:4.3.1`）和 RustFS（`rustfs/rustfs:1.0.0`）由本项目部署在 TEMPO_NAMESPACE；需要能拉取这两个镜像和 `amazon/aws-cli:2.37.4`，否则先同步到企业仓库 |
+| KAFKA_STORAGE_SIZE / RUSTFS_STORAGE_SIZE | 两者的 PVC 大小，默认 100Gi / 500Gi。Kafka 保留 24h、每分区上限 28GB，PVC 不小于 100Gi；RustFS 按 30 天 trace 容量估算 |
 | PROMETHEUS_REMOTE_WRITE_URL | 完整 http(s)://host:port/api/v1/write；kube-prometheus-stack 通常为 `http://<release>-kube-prometheus-prometheus.<ns>.svc.cluster.local:9090/api/v1/write`（不要用 headless 的 prometheus-operated）；确认 receiver 开启及认证要求，查找方法见 04 第 2.1 步 |
 | PROMETHEUS_RELEASE | ServiceMonitor / PrometheusRule 标签必须匹配现有 selector，不能猜 release 名 |
 | MONITORING_NAMESPACE、GRAFANA_NAMESPACE | 现有实例所在命名空间；本例网络策略按 namespace 放行 |
@@ -22,7 +18,7 @@
 | PROMETHEUS_RELEASE 取值 | 填 `helm list` 的 NAME 列（如 `kube-prometheus-stack`），不是 CHART 列（如 `kube-prometheus-stack-75.6.0`）；以 Prometheus CR 的 serviceMonitorSelector 中 release 标签值为准 |
 | OpenTelemetry Operator | Java 业务自动注入用，固定 Chart 0.96.0 / Operator 0.135.0 / Java agent 1.33.6；集群已有 Operator 时先确认版本与所有权，不重复安装；内网需同步 operator 与 autoinstrumentation-java 镜像 |
 | 已有 OTel Gateway | 如可复用，使用 GATEWAY_MODE=reuse；合并 traces pipeline，不替换其其他 pipeline |
-| 证书/Secret | tempo-credentials、tempo-ca、otel-gateway-tls；CA/客户端证书生命周期和轮换负责人 |
+| 证书/Secret | tempo-credentials（RustFS 访问密钥，RustFS 与 Tempo 共用）、otel-gateway-tls；CA/客户端证书生命周期和轮换负责人 |
 | SLO/RPO/RTO/吞吐 | 明确写入成功率、近期查询可用性、长期查询延迟和故障恢复预算 |
 
 现有 Prometheus 必须选择目标 namespace 中的 ServiceMonitor/PrometheusRule。namespaceSelector 选择的是对象所在 namespace，ServiceMonitor.spec.namespaceSelector 选择的是被监控 Service，两个不能混淆。
@@ -34,7 +30,7 @@
 ## 官方版本与字段来源
 
 - [Tempo 3.1.0 release](https://github.com/grafana/tempo/releases/tag/v3.1.0)：固定发行版。
-- [Tempo 3.1 release notes](https://grafana.com/docs/tempo/latest/release-notes/v3-1/)：Kafka SASL/TLS 能力。
+- [Tempo 3.1 release notes](https://grafana.com/docs/tempo/latest/release-notes/v3-1/)：Kafka 摄取能力。
 - [Chart 3.11.1 发布](https://github.com/grafana-community/helm-charts/releases/tag/tempo-distributed-3.11.1)：本地 tgz 为校验基准，values 从此包验证。
 - [Tempo v3.1.0 配置源](https://github.com/grafana/tempo/blob/v3.1.0/docs/sources/tempo/configuration/_index.md)：structuredConfig 字段来源。
 - [Tempo Operator v0.22.0](https://github.com/grafana/tempo-operator/releases/tag/v0.22.0)：Components 为 Tempo 2.10.8，故不用于本项目。

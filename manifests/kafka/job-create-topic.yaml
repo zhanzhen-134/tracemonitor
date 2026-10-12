@@ -1,0 +1,52 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tempo-kafka-create-topic
+  namespace: <TEMPO_NAMESPACE>
+  labels:
+    app.kubernetes.io/name: tempo-kafka-setup
+spec:
+  backoffLimit: 10
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tempo-kafka-setup
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: create-topic
+        image: apache/kafka:4.3.1
+        command:
+        - /bin/bash
+        - -ec
+        - |
+          B=tempo-kafka.<TEMPO_NAMESPACE>.svc.cluster.local:9092
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$B" --create --if-not-exists \
+            --topic tempo-traces --partitions 3 --replication-factor 1 \
+            --config min.insync.replicas=1 --config cleanup.policy=delete \
+            --config retention.ms=86400000 --config retention.bytes=28000000000 \
+            --config max.message.bytes=16000000
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$B" --describe --topic tempo-traces
+        env:
+        - name: KAFKA_HEAP_OPTS
+          value: -Xmx256m
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Interactive installer that follows docs/tempo/04-installation.md end to end:
-# Kafka/MinIO preparation -> Tempo + otel-gateway -> Prometheus Remote Write -> Grafana datasource
+# dedicated Kafka + RustFS -> Tempo + otel-gateway -> Prometheus Remote Write -> Grafana datasource
 # -> OpenTelemetry Operator Java injection -> verifies Service Graph series exist in Prometheus.
 # Every step can be skipped; answers are saved to build/install-state.env so the script can be re-run.
 set -euo pipefail
@@ -16,8 +16,7 @@ OPERATOR_CHART_VERSION=0.96.0
 
 STATE_VARS=(TEMPO_NAMESPACE MONITORING_NAMESPACE GRAFANA_NAMESPACE PROMETHEUS_RELEASE KPS_VERSION
   PROMETHEUS_SVC PROMETHEUS_SVC_PORT PROMETHEUS_PORT PROMETHEUS_REMOTE_WRITE_URL ZONE_MODE ZONE_A ZONE_B STORAGE_CLASS
-  CHANGE_APPROVAL_ID OTEL_OPERATOR_NAMESPACE KAFKA_NAMESPACE KAFKA_BOOTSTRAP KAFKA_PORT KAFKA_TOPIC
-  KAFKA_SASL_MECHANISM KAFKA_TLS MINIO_NAMESPACE MINIO_ENDPOINT MINIO_PORT MINIO_BUCKET MINIO_TLS
+  CHANGE_APPROVAL_ID OTEL_OPERATOR_NAMESPACE KAFKA_STORAGE_SIZE RUSTFS_STORAGE_SIZE
   GRAFANA_SVC GRAFANA_SVC_PORT GRAFANA_DEPLOY PROMETHEUS_UID ELASTICSEARCH_UID SAMPLING_RATIO INJECTED)
 
 # ---------- output helpers ----------
@@ -203,334 +202,18 @@ for s in d["items"]:
 }
 
 # ====================================================================================
-# 5a. Kafka
+# 5. Dedicated Kafka and RustFS (sizes only; install.sh deploys them in the Tempo namespace)
 # ====================================================================================
-live_store_groups() {   # Kafka consumer groups used by live-store, depending on zone mode
-  if [[ "${ZONE_MODE:-single}" == multi ]]; then echo tempo-live-store-zone-a tempo-live-store-zone-b; else echo tempo-live-store; fi
-}
-kafka_write_creds() { umask 077; printf 'KAFKA_USERNAME=%s\nKAFKA_PASSWORD=%s\n' "$1" "$2" > "$SECRETS/kafka.env"; }
-
-kafka_strimzi() {
-  local cluster listeners authz ver brokers replicas minisr
-  cluster=$(kubectl -n "$KAFKA_NAMESPACE" get kafka -o jsonpath='{.items[0].metadata.name}')
-  info "Strimzi Kafka 集群：$cluster"
-  kubectl -n "$KAFKA_NAMESPACE" get kafka "$cluster" -o json | jq_py '
-for l in d["spec"]["kafka"].get("listeners",[]):
-    print("  监听器 %-10s port=%-5s type=%-9s tls=%-5s auth=%s" % (l["name"], l["port"], l["type"], l.get("tls"), (l.get("authentication") or {}).get("type")))'
-  mapfile -t listeners < <(kubectl -n "$KAFKA_NAMESPACE" get kafka "$cluster" -o json | jq_py '
-for l in d["spec"]["kafka"].get("listeners",[]):
-    if l.get("tls") and (l.get("authentication") or {}).get("type")=="scram-sha-512" and l["type"] in ("internal","cluster-ip"):
-        print("%s:%s" % (l["name"], l["port"]))')
-  if ((${#listeners[@]} == 0)); then
-    die "没有 tls=true、auth=scram-sha-512 的 internal 监听器。按 docs/tempo/04-installation.md 第 5.2 步 ① 增加监听器（会滚动重启 broker）后重新运行本步骤"
+s_storage() {
+  info "Tempo 使用部署在 $TEMPO_NAMESPACE 中的专用单节点 Kafka（tempo-kafka）和 RustFS（tempo-rustfs），与业务完全隔离"
+  info "Kafka 保留 24 小时且每个分区上限 28GB（共约 84GB），PVC 应不小于 100Gi；RustFS 保存 30 天的 trace"
+  ask KAFKA_STORAGE_SIZE "Kafka PVC 大小" 100Gi
+  ask RUSTFS_STORAGE_SIZE "RustFS PVC 大小" 500Gi
+  [[ "$KAFKA_STORAGE_SIZE" =~ ^[1-9][0-9]*(Gi|Ti)$ && "$RUSTFS_STORAGE_SIZE" =~ ^[1-9][0-9]*(Gi|Ti)$ ]] \
+    || die "大小格式应为 100Gi / 1Ti"
+  if [[ "${STORAGE_CLASS:-}" == local-path ]]; then
+    warn "local-path 使用节点本地盘：请确认将要调度到的节点有足够空间（Kafka $KAFKA_STORAGE_SIZE + RustFS $RUSTFS_STORAGE_SIZE + Tempo 约 230GB）"
   fi
-  local l; pick l "选择 Tempo 使用的监听器" "${listeners[@]}"
-  KAFKA_PORT=${l##*:}
-  KAFKA_BOOTSTRAP="$cluster-kafka-bootstrap.$KAFKA_NAMESPACE.svc.cluster.local:$KAFKA_PORT"
-  KAFKA_SASL_MECHANISM=SCRAM-SHA-512 KAFKA_TLS=true
-
-  kubectl -n "$KAFKA_NAMESPACE" get kafka "$cluster" -o jsonpath='{.spec.entityOperator.topicOperator}{"|"}{.spec.entityOperator.userOperator}' | grep -q '^{.*}|{.*}$' \
-    || die "Kafka CR 未启用 entityOperator 的 topicOperator / userOperator，无法用 KafkaTopic / KafkaUser 创建"
-  authz=$(kubectl -n "$KAFKA_NAMESPACE" get kafka "$cluster" -o jsonpath='{.spec.kafka.authorization.type}')
-  ver=$(kubectl get crd kafkausers.kafka.strimzi.io -o jsonpath='{.spec.versions[?(@.served==true)].name}' | tr ' ' '\n' | grep -E '^v1beta2$|^v1$' | sed -n 1p)
-  brokers=$(kubectl -n "$KAFKA_NAMESPACE" get pods -l "strimzi.io/cluster=$cluster,strimzi.io/broker-role=true" -o name | wc -l)
-  ((brokers > 0)) || brokers=$(kubectl -n "$KAFKA_NAMESPACE" get pods -l "strimzi.io/cluster=$cluster,strimzi.io/kind=Kafka" -o name | wc -l)
-  replicas=$(( brokers >= 3 ? 3 : brokers )); minisr=$(( replicas >= 3 ? 2 : 1 ))
-  ((brokers >= 3)) || warn "broker 只有 $brokers 个，Topic 副本数降为 $replicas，不满足生产 RF=3 要求"
-
-  local acl=""
-  if [[ "$authz" == simple ]]; then
-    acl="  authorization:
-    type: simple
-    acls:
-    - resource: {type: topic, name: $KAFKA_TOPIC, patternType: literal}
-      operations: [Read, Write, Describe]"
-    local g
-    for g in block-builder metrics-generator $(live_store_groups); do
-      acl+="
-    - resource: {type: group, name: $g, patternType: literal}
-      operations: [Read, Describe]"
-    done
-  else
-    warn "Kafka 未开启 simple 授权，不创建 ACL（任何认证用户都能访问该 Topic）"
-  fi
-  cat > "$SECRETS/kafka-tempo.yaml" <<EOF
-apiVersion: kafka.strimzi.io/$ver
-kind: KafkaTopic
-metadata:
-  name: $KAFKA_TOPIC
-  namespace: $KAFKA_NAMESPACE
-  labels:
-    strimzi.io/cluster: $cluster
-spec:
-  partitions: 3
-  replicas: $replicas
-  config:
-    min.insync.replicas: $minisr
-    retention.ms: 86400000
-    cleanup.policy: delete
-    max.message.bytes: 16000000
----
-apiVersion: kafka.strimzi.io/$ver
-kind: KafkaUser
-metadata:
-  name: tempo
-  namespace: $KAFKA_NAMESPACE
-  labels:
-    strimzi.io/cluster: $cluster
-spec:
-  authentication:
-    type: scram-sha-512
-$acl
-EOF
-  cat "$SECRETS/kafka-tempo.yaml"
-  confirm "在 $KAFKA_NAMESPACE 中创建以上 KafkaTopic / KafkaUser？" || die "已取消"
-  run kubectl apply --dry-run=server -f "$SECRETS/kafka-tempo.yaml"
-  run kubectl apply -f "$SECRETS/kafka-tempo.yaml"
-  run kubectl -n "$KAFKA_NAMESPACE" wait "kafkatopic/$KAFKA_TOPIC" kafkauser/tempo --for=condition=Ready --timeout=5m
-  kafka_write_creds tempo "$(secret_val "$KAFKA_NAMESPACE" tempo password)"
-  secret_val "$KAFKA_NAMESPACE" "$cluster-cluster-ca-cert" ca.crt > "$SECRETS/kafka-ca.crt"
-}
-
-kafka_cli() {
-  local pods pod kbin bs proto mech admin_user admin_pass ts tempo_pass kx
-  mapfile -t pods < <(kubectl -n "$KAFKA_NAMESPACE" get pods -o name | tr -d '\r' | grep -i kafka || true)
-  pick pod "选择一个 Kafka broker Pod" "${pods[@]}"
-  kx() { kubectl -n "$KAFKA_NAMESPACE" exec -i "$pod" -- "$@"; }
-  info "broker 监听器相关环境变量："
-  kx sh -c 'env | grep -iE "LISTENERS|SASL|SECURITY_PROTOCOL|AUTHORIZER" || true'
-  kbin=$(kx sh -c 'for d in /opt/bitnami/kafka/bin /opt/kafka/bin /usr/bin; do [ -x $d/kafka-topics.sh ] && echo $d && break; done' | tr -d '\r')
-  [[ -n "$kbin" ]] || die "Pod 内未找到 kafka-topics.sh"
-  ok "Kafka CLI 目录：$kbin"
-  pick proto "Tempo 连接使用的监听器协议" SASL_SSL SASL_PLAINTEXT PLAINTEXT
-  ask bs "Pod 内可用的该监听器地址 host:port（如 localhost:9093）"
-  ask KAFKA_BOOTSTRAP "Tempo 使用的 bootstrap（<Service>.$KAFKA_NAMESPACE.svc.cluster.local:<端口>）"
-  ask KAFKA_PORT "broker 容器端口（NetworkPolicy 使用）" "${KAFKA_BOOTSTRAP##*:}"
-  KAFKA_TLS=false; [[ "$proto" == SASL_SSL ]] && KAFKA_TLS=true
-
-  local conf="security.protocol=$proto"
-  if [[ "$proto" != PLAINTEXT ]]; then
-    pick mech "SASL 机制" SCRAM-SHA-512 SCRAM-SHA-256 PLAIN
-    ask admin_user "Kafka 管理员用户名"
-    ask_secret admin_pass "Kafka 管理员密码"
-    local module=org.apache.kafka.common.security.scram.ScramLoginModule
-    [[ "$mech" == PLAIN ]] && module=org.apache.kafka.common.security.plain.PlainLoginModule
-    conf+=$'\n'"sasl.mechanism=$mech"$'\n'"sasl.jaas.config=$module required username=\"$admin_user\" password=\"$admin_pass\";"
-  else
-    mech=PLAIN
-  fi
-  if [[ "$KAFKA_TLS" == true ]]; then
-    ask ts "Pod 内 PEM 格式 CA 文件路径（如 /opt/bitnami/kafka/config/certs/kafka.truststore.pem）"
-    conf+=$'\n'"ssl.truststore.type=PEM"$'\n'"ssl.truststore.location=$ts"
-  fi
-  printf '%s\n' "$conf" | kx sh -c 'umask 077; cat > /tmp/tempo-admin.properties'
-  local K=("--bootstrap-server" "$bs" "--command-config" /tmp/tempo-admin.properties)
-  run kx "$kbin/kafka-topics.sh" "${K[@]}" --list >/dev/null || die "管理员连接 Kafka 失败，检查地址、账号和 CA"
-  ok "管理员连接正常"
-
-  kx "$kbin/kafka-configs.sh" "${K[@]}" --describe --entity-type brokers --entity-default --all 2>/dev/null \
-    | grep -E ' (message.max.bytes|replica.fetch.max.bytes)=' || true
-  if confirm "将 broker 默认 message.max.bytes / replica.fetch.max.bytes 调整为 16000000（已 ≥ 该值则选 N）？"; then
-    run kx "$kbin/kafka-configs.sh" "${K[@]}" --alter --entity-type brokers --entity-default \
-      --add-config message.max.bytes=16000000,replica.fetch.max.bytes=16000000
-  fi
-
-  KAFKA_SASL_MECHANISM=$mech
-  if [[ "$proto" == PLAINTEXT ]]; then
-    kafka_write_creds "" ""
-  elif [[ "$mech" == PLAIN ]]; then
-    warn "PLAIN 机制无法动态创建用户，请输入已在 broker JAAS 中配置好的 Tempo 账号"
-    local u p; ask u "Tempo Kafka 用户名" tempo; ask_secret p "Tempo Kafka 密码"
-    kafka_write_creds "$u" "$p"
-  else
-    tempo_pass=$(openssl rand -base64 24 | tr -d '/+=\r\n')
-    echo "+ kafka-configs.sh --alter --entity-type users --entity-name tempo --add-config $mech=[password=***]"
-    kx "$kbin/kafka-configs.sh" "${K[@]}" --alter --entity-type users --entity-name tempo \
-      --add-config "$mech=[password=$tempo_pass]"
-    kafka_write_creds tempo "$tempo_pass"
-  fi
-
-  if kx "$kbin/kafka-topics.sh" "${K[@]}" --describe --topic "$KAFKA_TOPIC" >/dev/null 2>&1; then
-    warn "Topic $KAFKA_TOPIC 已存在，沿用（请确认分区数与副本数）"
-  else
-    run kx "$kbin/kafka-topics.sh" "${K[@]}" --create --topic "$KAFKA_TOPIC" --partitions 3 --replication-factor 3 \
-      --config min.insync.replicas=2 --config retention.ms=86400000 --config cleanup.policy=delete --config max.message.bytes=16000000
-  fi
-  if [[ "$proto" != PLAINTEXT ]]; then
-    if kx "$kbin/kafka-acls.sh" "${K[@]}" --list >/dev/null 2>&1; then
-      run kx "$kbin/kafka-acls.sh" "${K[@]}" --add --allow-principal User:tempo \
-        --operation Read --operation Write --operation Describe --topic "$KAFKA_TOPIC"
-      local g
-      for g in block-builder metrics-generator $(live_store_groups); do
-        run kx "$kbin/kafka-acls.sh" "${K[@]}" --add --allow-principal User:tempo --operation Read --operation Describe --group "$g"
-      done
-    else
-      warn "Kafka 未开启授权，跳过 ACL"
-    fi
-  fi
-  kx "$kbin/kafka-topics.sh" "${K[@]}" --describe --topic "$KAFKA_TOPIC"
-  if [[ "$KAFKA_TLS" == true ]]; then kx cat "$ts" | tr -d '\r' > "$SECRETS/kafka-ca.crt"; else echo '# not used' > "$SECRETS/kafka-ca.crt"; fi
-  kx rm -f /tmp/tempo-admin.properties
-}
-
-kafka_manual() {
-  ask KAFKA_BOOTSTRAP "Tempo 使用的 bootstrap host:port"
-  ask KAFKA_PORT "broker 容器端口" "${KAFKA_BOOTSTRAP##*:}"
-  pick KAFKA_SASL_MECHANISM "SASL 机制（无 SASL 选 PLAIN 并把用户名密码留空）" SCRAM-SHA-512 SCRAM-SHA-256 PLAIN
-  pick KAFKA_TLS "是否 TLS" true false
-  local u p f
-  read -r -p "Tempo Kafka 用户名（无 SASL 直接回车）: " u
-  ask_secret p "Tempo Kafka 密码（无 SASL 直接回车）"
-  kafka_write_creds "$u" "$p"
-  if [[ "$KAFKA_TLS" == true ]]; then ask f "Kafka CA 文件本地路径"; cp "$f" "$SECRETS/kafka-ca.crt"; else echo '# not used' > "$SECRETS/kafka-ca.crt"; fi
-}
-
-s_kafka() {
-  kubectl get ns | grep -iE 'kafka|strimzi|mq' || true
-  ask KAFKA_NAMESPACE "Kafka 所在 namespace"
-  ask KAFKA_TOPIC "Tempo 专用 Topic 名" tempo-traces
-  local mode
-  if kubectl get crd kafkas.kafka.strimzi.io >/dev/null 2>&1 && [[ -n "$(kubectl -n "$KAFKA_NAMESPACE" get kafka -o name 2>/dev/null)" ]]; then
-    info "检测到 Strimzi 管理的 Kafka"
-    pick mode "Kafka 准备方式" "Strimzi（KafkaTopic / KafkaUser）" "已手工准备好，直接输入参数"
-  else
-    info "未检测到 Strimzi，将在 broker Pod 内执行 Kafka CLI"
-    pick mode "Kafka 准备方式" "在 broker Pod 内用 CLI 创建" "已手工准备好，直接输入参数"
-  fi
-  case "$mode" in
-    Strimzi*) kafka_strimzi ;;
-    在*) kafka_cli ;;
-    *) kafka_manual ;;
-  esac
-  chmod 600 "$SECRETS"/kafka*
-  ok "Kafka：bootstrap=$KAFKA_BOOTSTRAP mechanism=$KAFKA_SASL_MECHANISM tls=$KAFKA_TLS topic=$KAFKA_TOPIC"
-}
-
-# ====================================================================================
-# 5b. MinIO
-# ====================================================================================
-minio_write_creds() { umask 077; printf 'MINIO_ACCESS_KEY=%s\nMINIO_SECRET_KEY=%s\n' "$1" "$2" > "$SECRETS/minio.env"; }
-
-s_minio() {
-  kubectl get ns | grep -iE 'minio|s3|storage' || true
-  ask MINIO_NAMESPACE "MinIO 所在 namespace"
-  ask MINIO_BUCKET "Tempo 专用 bucket" tempo-traces
-  local mode
-  pick mode "MinIO 准备方式" "自动创建 bucket / 账号 / 策略" "已手工准备好，直接输入参数"
-  if [[ "$mode" == 已* ]]; then
-    local a s f
-    ask MINIO_ENDPOINT "S3 endpoint host:port（不含 https://）"
-    ask MINIO_PORT "MinIO 容器端口" "${MINIO_ENDPOINT##*:}"
-    pick MINIO_TLS "是否 TLS" true false
-    ask a "Tempo access key"; ask_secret s "Tempo secret key"
-    minio_write_creds "$a" "$s"
-    if [[ "$MINIO_TLS" == true ]]; then ask f "MinIO CA 文件本地路径"; cp "$f" "$SECRETS/minio-ca.crt"; else echo '# not used' > "$SECRETS/minio-ca.crt"; fi
-    return
-  fi
-
-  local pods pod podjson ctr root_user root_pass svcs svc svcport certdir host scheme mcbin
-  mapfile -t pods < <(kubectl -n "$MINIO_NAMESPACE" get pods -o name | tr -d '\r' | grep -iv console || true)
-  pick pod "选择 MinIO 服务端 Pod" "${pods[@]}"
-  podjson=$(kubectl -n "$MINIO_NAMESPACE" get "$pod" -o json)
-  ctr=$(jq_py '
-cs=d["spec"]["containers"]
-m=[c["name"] for c in cs if "minio" in c["image"] and "/mc" not in c["image"]]
-print(m[0] if m else cs[0]["name"])' <<<"$podjson")
-  # root credentials: env value, env secretKeyRef, or operator config.env
-  read -r root_user root_pass < <(jq_py '
-import base64,subprocess
-c=[c for c in d["spec"]["containers"] if c["name"]=="'"$ctr"'"][0]
-def val(names):
-    for e in c.get("env",[]):
-        if e["name"] in names:
-            if "value" in e: return e["value"]
-            r=(e.get("valueFrom") or {}).get("secretKeyRef")
-            if r:
-                out=subprocess.run(["kubectl","-n",d["metadata"]["namespace"],"get","secret",r["name"],"-o","jsonpath={.data."+r["key"].replace(".","\\.")+"}"],capture_output=True,text=True).stdout
-                return base64.b64decode(out).decode() if out else ""
-    return ""
-print(val(["MINIO_ROOT_USER","MINIO_ACCESS_KEY"]) or "-", val(["MINIO_ROOT_PASSWORD","MINIO_SECRET_KEY"]) or "-")' <<<"$podjson")
-  if [[ "$root_user" == - || "$root_pass" == - ]]; then
-    local envfile
-    envfile=$(kubectl -n "$MINIO_NAMESPACE" exec "$pod" -c "$ctr" -- sh -c 'f=${MINIO_CONFIG_ENV_FILE:-}; [ -n "$f" ] && cat "$f"' 2>/dev/null | tr -d '\r' || true)
-    root_user=$(sed -n 's/^export MINIO_ROOT_USER="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' <<<"$envfile")
-    root_pass=$(sed -n 's/^export MINIO_ROOT_PASSWORD="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' <<<"$envfile")
-  fi
-  if [[ -z "$root_user" || "$root_user" == - ]]; then
-    warn "未能自动取得 MinIO root 账号"
-    ask root_user "MinIO root 用户名"; ask_secret root_pass "MinIO root 密码"
-  else
-    ok "已从 Pod 配置取得 MinIO root 账号：$root_user"
-  fi
-
-  mapfile -t svcs < <(kubectl -n "$MINIO_NAMESPACE" get svc -o json | jq_py '
-for s in d["items"]:
-    for p in s["spec"].get("ports",[]):
-        if p["port"] in (9000,443,80) or "api" in (p.get("name") or "") or "s3" in (p.get("name") or ""):
-            print("%s:%s" % (s["metadata"]["name"], p["port"])); break')
-  pick svc "选择 S3 API Service:端口" "${svcs[@]}"
-  svcport=${svc##*:}; svc=${svc%%:*}
-  MINIO_ENDPOINT="$svc.$MINIO_NAMESPACE.svc.cluster.local:$svcport"
-  ask MINIO_PORT "MinIO S3 容器端口（NetworkPolicy 使用）" 9000
-
-  certdir=$(kubectl -n "$MINIO_NAMESPACE" exec "$pod" -c "$ctr" -- sh -c 'for d in /etc/minio/certs /opt/bitnami/minio/certs /tmp/certs "$HOME/.minio/certs"; do [ -f "$d/public.crt" ] && echo "$d" && break; done' | tr -d '\r' || true)
-  if [[ -n "$certdir" ]]; then
-    MINIO_TLS=true scheme=https
-    kubectl -n "$MINIO_NAMESPACE" exec "$pod" -c "$ctr" -- sh -c "cat $certdir/CAs/*.crt 2>/dev/null || true" | tr -d '\r' > "$SECRETS/minio-ca.crt"
-    kubectl -n "$MINIO_NAMESPACE" exec "$pod" -c "$ctr" -- cat "$certdir/public.crt" | tr -d '\r' > "$SECRETS/minio-public.crt"
-    if [[ ! -s "$SECRETS/minio-ca.crt" ]]; then
-      if [[ "$(openssl x509 -in "$SECRETS/minio-public.crt" -noout -subject | sed 's/^subject=//')" == "$(openssl x509 -in "$SECRETS/minio-public.crt" -noout -issuer | sed 's/^issuer=//')" ]]; then
-        cp "$SECRETS/minio-public.crt" "$SECRETS/minio-ca.crt"
-      else
-        kubectl get cm kube-root-ca.crt -n "$MINIO_NAMESPACE" -o jsonpath='{.data.ca\.crt}' > "$SECRETS/minio-ca.crt"
-      fi
-    fi
-    openssl verify -CAfile "$SECRETS/minio-ca.crt" "$SECRETS/minio-public.crt" || die "无法确定 MinIO 证书的 CA，请改用“已手工准备好”方式并提供 CA 文件"
-    openssl x509 -in "$SECRETS/minio-public.crt" -noout -ext subjectAltName | grep -q "$svc" \
-      || warn "MinIO 证书 SAN 中未包含 $svc，Tempo 连接时会证书校验失败，需要为 MinIO 重新签发证书"
-  else
-    MINIO_TLS=false scheme=http
-    warn "MinIO 未启用 TLS，Tempo 将以明文访问（insecure: true）"
-    echo '# not used' > "$SECRETS/minio-ca.crt"
-  fi
-  host="$scheme://$MINIO_ENDPOINT"
-
-  # mc: inside the MinIO container if present, otherwise a temporary mc Pod
-  local mpod=$pod mctr=$ctr
-  mcbin=$(kubectl -n "$MINIO_NAMESPACE" exec "$pod" -c "$ctr" -- sh -c 'command -v mc || ls /opt/bitnami/minio-client/bin/mc 2>/dev/null' | tr -d '\r' || true)
-  if [[ -z "$mcbin" ]]; then
-    local img; ask img "MinIO 容器内没有 mc，输入可拉取的 mc 镜像（如 quay.io/minio/mc:RELEASE.<固定版本>）"
-    run kubectl -n "$MINIO_NAMESPACE" run tempo-mc --image="$img" --restart=Never --command -- sleep 3600
-    run kubectl -n "$MINIO_NAMESPACE" wait pod/tempo-mc --for=condition=Ready --timeout=3m
-    mpod=pod/tempo-mc mctr=tempo-mc mcbin=mc
-  fi
-  mx() { kubectl -n "$MINIO_NAMESPACE" exec -i "$mpod" -c "$mctr" -- env MC_CONFIG_DIR=/tmp/.mc "$@"; }
-  mx sh -c 'mkdir -p /tmp/.mc/certs/CAs && cat > /tmp/.mc/certs/CAs/ca.crt' < "$SECRETS/minio-ca.crt"
-  mx "$mcbin" alias set admin "$host" "$root_user" "$root_pass" >/dev/null
-  run mx "$mcbin" admin info admin
-  run mx "$mcbin" mb --ignore-existing "admin/$MINIO_BUCKET"
-  sed "s/<MINIO_BUCKET>/$MINIO_BUCKET/g" integrations/minio/policy.json | mx sh -c 'cat > /tmp/tempo-policy.json'
-  mx "$mcbin" admin policy create admin tempo-rw /tmp/tempo-policy.json 2>/dev/null \
-    || run mx "$mcbin" admin policy add admin tempo-rw /tmp/tempo-policy.json
-  local tempo_secret
-  tempo_secret=$(openssl rand -base64 30 | tr -d '/+=\r\n')
-  echo "+ mc admin user add admin tempo ***"
-  mx "$mcbin" admin user add admin tempo "$tempo_secret" >/dev/null
-  mx "$mcbin" admin policy attach admin tempo-rw --user tempo 2>/dev/null \
-    || mx "$mcbin" admin policy set admin tempo-rw user=tempo 2>/dev/null || true
-  minio_write_creds tempo "$tempo_secret"
-
-  info "用 Tempo 账号做 PUT / GET / DELETE canary"
-  mx "$mcbin" alias set tempo "$host" tempo "$tempo_secret" >/dev/null
-  mx sh -c 'echo tempo-probe > /tmp/probe.txt'
-  run mx "$mcbin" cp /tmp/probe.txt "tempo/$MINIO_BUCKET/_acceptance/probe.txt"
-  [[ "$(mx "$mcbin" cat "tempo/$MINIO_BUCKET/_acceptance/probe.txt" | tr -d '\r')" == tempo-probe ]] || die "canary 读取失败"
-  run mx "$mcbin" rm "tempo/$MINIO_BUCKET/_acceptance/probe.txt"
-  ok "canary 通过"
-  mx rm -rf /tmp/.mc /tmp/tempo-policy.json /tmp/probe.txt
-  if [[ "$mpod" == pod/tempo-mc ]]; then kubectl -n "$MINIO_NAMESPACE" delete pod tempo-mc --wait=false; fi
-  chmod 600 "$SECRETS"/minio*
-  ok "MinIO：endpoint=$MINIO_ENDPOINT bucket=$MINIO_BUCKET tls=$MINIO_TLS"
 }
 
 # ====================================================================================
@@ -583,9 +266,9 @@ s_grafana_uids() {
 # ====================================================================================
 s_render() {
   export ZONE_A="${ZONE_A:-}" ZONE_B="${ZONE_B:-}"
-  export KAFKA_TLS MINIO_TLS TEMPO_NAMESPACE STORAGE_CLASS KAFKA_BOOTSTRAP KAFKA_TOPIC KAFKA_SASL_MECHANISM MINIO_ENDPOINT MINIO_BUCKET \
+  export TEMPO_NAMESPACE STORAGE_CLASS KAFKA_STORAGE_SIZE RUSTFS_STORAGE_SIZE \
     PROMETHEUS_REMOTE_WRITE_URL PROMETHEUS_RELEASE ZONE_A ZONE_B MONITORING_NAMESPACE GRAFANA_NAMESPACE \
-    KAFKA_NAMESPACE MINIO_NAMESPACE PROMETHEUS_UID ELASTICSEARCH_UID KAFKA_PORT MINIO_PORT PROMETHEUS_PORT
+    PROMETHEUS_UID ELASTICSEARCH_UID PROMETHEUS_PORT
   py - <<'EOF'
 import json, os
 example = json.load(open('environment.example.json', encoding='utf-8-sig'))
@@ -601,21 +284,6 @@ json.dump(env, open('environment.local.json', 'w', encoding='utf-8'), indent=2, 
 EOF
   ok "已写入 environment.local.json"
   run py scripts/tempo/render.py environment.local.json
-  # Plaintext in-cluster dependencies: adjust the rendered Tempo values (docs 5.4 / 5.7).
-  py - <<'EOF'
-import os, yaml
-p = 'build/charts/tempo/values-production.yaml'
-v = yaml.safe_load(open(p, encoding='utf-8'))
-if os.environ['KAFKA_TLS'] != 'true':
-    k = v['tempo']['structuredConfig']['ingest']['kafka']
-    k['tls_enabled'] = False; k.pop('tls_ca_path', None)
-    print('Kafka: TLS disabled in rendered values')
-if os.environ['MINIO_TLS'] != 'true':
-    s = v['storage']['trace']['s3']
-    s['insecure'] = True; s.pop('tls_ca_path', None)
-    print('MinIO: insecure (HTTP) in rendered values')
-yaml.safe_dump(v, open(p, 'w', encoding='utf-8'), sort_keys=False, allow_unicode=True)
-EOF
   grep -n -A3 'processors:' build/tempo-rendered.yaml | sed -n 1,4p
 }
 
@@ -642,14 +310,19 @@ s_secrets() {
       chmod 600 ./*
     )
   fi
-  [[ -f "$SECRETS/kafka.env" && -f "$SECRETS/minio.env" ]] || die "缺少 Kafka / MinIO 凭据，请先执行步骤 5"
-  cat "$SECRETS/kafka.env" "$SECRETS/minio.env" > "$SECRETS/credentials.env"; chmod 600 "$SECRETS/credentials.env"
+  if [[ ! -f "$SECRETS/credentials.env" ]]; then
+    info "生成 RustFS 访问密钥（RustFS 与 Tempo 共用，只有 Tempo 使用这个 RustFS）"
+    ( umask 077
+      printf 'RUSTFS_ACCESS_KEY=tempo-%s\nRUSTFS_SECRET_KEY=%s\n' \
+        "$(openssl rand -hex 4)" "$(openssl rand -base64 30 | tr -d '/+=\r\n')" > "$SECRETS/credentials.env" )
+  else
+    info "沿用已有的 $SECRETS/credentials.env（RustFS 已用它初始化，不能更换）"
+  fi
   apply_secret() { kubectl -n "$TEMPO_NAMESPACE" create secret generic "$@" --dry-run=client -o yaml | kubectl apply -f -; }
   apply_secret tempo-credentials --from-env-file="$SECRETS/credentials.env"
-  apply_secret tempo-ca --from-file=kafka-ca.crt="$SECRETS/kafka-ca.crt" --from-file=minio-ca.crt="$SECRETS/minio-ca.crt"
   apply_secret otel-gateway-tls --from-file=ca.crt="$SECRETS/otel-ca.crt" \
     --from-file=tls.crt="$SECRETS/otel-server.crt" --from-file=tls.key="$SECRETS/otel-server.key"
-  kubectl -n "$TEMPO_NAMESPACE" get secret tempo-credentials tempo-ca otel-gateway-tls
+  kubectl -n "$TEMPO_NAMESPACE" get secret tempo-credentials otel-gateway-tls
 }
 
 # ====================================================================================
@@ -659,9 +332,12 @@ s_install() {
   export TEMPO_NAMESPACE CHANGE_APPROVAL_ID GATEWAY_MODE=new
   run bash scripts/tempo/install.sh
   kubectl -n "$TEMPO_NAMESPACE" get pods
-  info "检查 Tempo 是否能连上 Kafka / MinIO（最近 5 分钟日志中的错误）"
-  kubectl -n "$TEMPO_NAMESPACE" logs statefulset/tempo-block-builder --since=5m 2>/dev/null | grep -iE 'level=error|SASL|x509|AccessDenied' | tail -n 5 || true
-  kubectl -n "$TEMPO_NAMESPACE" logs statefulset/tempo-metrics-generator --since=5m 2>/dev/null | grep -iE 'level=error|SASL|x509' | tail -5 || true
+  info "Kafka Topic："
+  kubectl -n "$TEMPO_NAMESPACE" exec tempo-kafka-0 -- /opt/kafka/bin/kafka-topics.sh \
+    --bootstrap-server localhost:9092 --describe --topic tempo-traces 2>/dev/null | sed -n 1,4p || true
+  info "检查 Tempo 是否能连上 Kafka / RustFS（最近 5 分钟日志中的错误）"
+  kubectl -n "$TEMPO_NAMESPACE" logs statefulset/tempo-block-builder --since=5m 2>/dev/null | grep -iE 'level=error|AccessDenied|NoSuchBucket|connection refused' | tail -n 5 || true
+  kubectl -n "$TEMPO_NAMESPACE" logs statefulset/tempo-metrics-generator --since=5m 2>/dev/null | grep -iE 'level=error|connection refused' | tail -n 5 || true
 }
 
 # ====================================================================================
@@ -938,13 +614,12 @@ main() {
   fi
   s_tools
   step 2   "收集环境参数"                              s_params
-  step 5a  "准备 Kafka（Topic / 用户 / ACL）"          s_kafka
-  step 5b  "准备 MinIO（bucket / 账号 / 策略）"        s_minio
+  step 5   "Tempo 专用 Kafka / RustFS 的存储大小"      s_storage
   step 2.2 "连接 Grafana，选择 Prometheus / ES 数据源"  s_grafana_uids
   step 3   "生成 environment.local.json 并渲染"        s_render
   step 4   "集群预检"                                  s_preflight
   step 6   "Namespace、gateway 证书与 Secret"          s_secrets
-  step 7   "安装 Tempo 与 otel-gateway"                s_install
+  step 7   "部署 Kafka / RustFS，安装 Tempo 与 otel-gateway" s_install
   step 8   "检查 Prometheus 抓取选择器"                s_scrape
   step 9   "开启 Prometheus Remote Write 接收"         s_remote_write
   step 10  "注册 Grafana Tempo 数据源"                 s_grafana_ds

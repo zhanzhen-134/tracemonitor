@@ -75,19 +75,19 @@ spec:
     - protocol: UDP
       port: 7946
   - to:
-    - namespaceSelector:
+    - podSelector:
         matchLabels:
-          kubernetes.io/metadata.name: <KAFKA_NAMESPACE>
+          app.kubernetes.io/name: tempo-kafka
     ports:
     - protocol: TCP
-      port: <KAFKA_PORT>
+      port: 9092
   - to:
-    - namespaceSelector:
+    - podSelector:
         matchLabels:
-          kubernetes.io/metadata.name: <MINIO_NAMESPACE>
+          app.kubernetes.io/name: tempo-rustfs
     ports:
     - protocol: TCP
-      port: <MINIO_PORT>
+      port: 9000
   - to:
     - namespaceSelector:
         matchLabels:

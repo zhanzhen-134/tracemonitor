@@ -7,7 +7,7 @@
 | 平均 / 峰值 spans/s（采样前） | 10000 / 30000 | 待压测 |
 | 平均序列化 span 大小 | 1000 B | 从真实 payload 测量 |
 | head sampling 比例 | 20% | 按业务及服务图完整性决定 |
-| Kafka 保留 | 24h | 大于最大故障+追平时间+余量 |
+| Kafka 保留 | 24h，且每分区上限 28GB | 大于最大故障+追平时间+余量；专用单节点 Kafka，副本数 1 |
 | Tempo 对象保留 | 30d | 业务/合规确认 |
 | Kafka 压缩比 / S3 压缩比 | 0.5 / 0.3 | 数据决定，不能照搬 |
 | Query QPS / 并发 | 10 / 20 | 含长时间 TraceQL 查询 |
@@ -17,9 +17,9 @@
 
 入口平均字节率 R = spans/s × span_bytes × sampling。本例平均 2 MB/s、峰值 6 MB/s（十进制）。SDK head sampling 使用 ParentBased + TraceIdRatioBased，跨服务继承采样决策；不要在每层独立随机采样。
 
-Kafka 原始逻辑数据 = R × retention_seconds × 压缩比；磁盘预算再乘 RF 和至少 1.3 余量。本例 2e6 × 86400 × 0.5 × 3 × 1.3 ≈ 337 GB，不含索引与 segment 开销。一个 broker 故障后 ISR>=2、补副本和 catch-up I/O 必须仍可支撑峰值。
+Kafka 原始逻辑数据 = R × retention_seconds × 压缩比；磁盘预算再乘副本数和至少 1.3 余量。专用 Kafka 为单节点、1 副本：本例 2e6 × 86400 × 0.5 × 1 × 1.3 ≈ 112 GB，超过默认 100Gi PVC；因此 broker 另设每分区 28GB（共约 84GB）的上限，流量达到算例水平时实际保留时间会短于 24h。按实测流量调大 KAFKA_STORAGE_SIZE，并同步调整 retention.bytes。
 
-MinIO 逻辑对象 = R × 86400 × days × S3 压缩比 × 1.3。本例约 2.02 TB；物理磁盘再按 MinIO erasure coding/replication 开销计算，包含 compaction 临时双份、版本历史、跨站复制和删除延迟。不要重复将 EC 与 3 副本同时相乘，按实际拓扑算。
+RustFS 逻辑对象 = R × 86400 × days × S3 压缩比 × 1.3。本例约 2.02 TB；专用 RustFS 为单节点单盘，没有纠删码开销，但需预留 compaction 临时双份与删除延迟。默认 RUSTFS_STORAGE_SIZE=500Gi 只适合低流量起步，按实测流量扩容或缩短 block_retention。
 
 Tempo CPU/内存不能从字节率直接推导。每个 Block Builder 的 scratch 至少容纳一个完整 consume cycle 的数据与峰值临时编码空间。Live Store 内存约为单分区采样后速率 × 最近窗口 × 展开系数，加索引与查询空间；跨区复制会使总占用增加。生产 values 的 4Gi request/8Gi limit 是初始压测值。压测观测 RSS、GC、Kafka lag、S3 请求与查询 p95 后调整，保留单 AZ 故障容量。
 

@@ -13,7 +13,9 @@ assert cfg['storage']['trace']['backend']=='s3'
 assert cfg['ingest']['kafka']['auto_create_topic_enabled'] is False
 assert cfg['cache']['caches']==[], 'Disabled cache must not reference absent Memcached'
 assert cfg['overrides']['defaults']['metrics_generator']['processors']==['span-metrics','service-graphs']
-assert cfg['storage']['trace']['s3']['secret_key']=='${MINIO_SECRET_KEY}'
+assert cfg['storage']['trace']['s3']['secret_key']=='${RUSTFS_SECRET_KEY}'
+assert cfg['storage']['trace']['s3']['endpoint'].startswith('tempo-rustfs.')
+assert cfg['ingest']['kafka']['address'].startswith('tempo-kafka.')
 for d in workloads:
     spec=d['spec']['template']['spec']
     for c in spec['containers']:
@@ -21,8 +23,6 @@ for d in workloads:
             continue
         assert '-config.expand-env=true' in c['args'], d['metadata']['name']
         assert {'secretRef':{'name':'tempo-credentials'}} in c['envFrom'], d['metadata']['name']
-        assert any(v.get('secret',{}).get('secretName')=='tempo-ca' for v in spec['volumes'])
-        assert any(m['mountPath']=='/etc/tempo/ca' for m in c['volumeMounts'])
         assert c['resources']['requests'] and c['resources']['limits']
         assert c['startupProbe'] and c['readinessProbe'] and c['livenessProbe']
         assert not spec.get('automountServiceAccountToken',False)
@@ -58,4 +58,4 @@ for path in (root/'build/manifests').rglob('*.yaml'):
                     for port in rule.get('ports',[]):
                         assert isinstance(port['port'],int), (path,port)
 json.loads((root/'build/integrations/grafana/tempo-overview.json').read_text())
-print(f'PASS: {mode}/{zone_mode}-zone, {len(workloads)} workloads; ports, selectors, Secret/CA, targets, cache, HA and policies checked')
+print(f'PASS: {mode}/{zone_mode}-zone, {len(workloads)} workloads; ports, selectors, Secret, Kafka/RustFS wiring, targets, cache, HA and policies checked')

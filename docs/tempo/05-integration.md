@@ -1,44 +1,42 @@
 # 现有平台增量集成
 
-本节是各平台集成的原理与约束说明；集群内 Kafka/MinIO、Prometheus、Grafana、ES 的逐条操作命令以 [04-installation.md](04-installation.md) 为准，由安装执行人执行，共享设施变更先取得审批。Kafka/MinIO CLI 连接的是显式 endpoint，没有 Kubernetes namespace；kubectl 操作使用当前 kubeconfig context，显式指定 namespace。
+本节是各组件集成的原理与约束说明；Tempo 专用的 Kafka / RustFS，以及现有 Prometheus、Grafana、ES 的逐条操作命令以 [04-installation.md](04-installation.md) 为准，由安装执行人执行，共享设施变更先取得审批。kubectl 操作使用当前 kubeconfig context，显式指定 namespace。
 
-## Kafka
+## Tempo 专用 Kafka（tempo-kafka）
 
-使用与现有 Kafka 版本一致的 CLI。管理员的 `client.properties` 必须存于受限文件，包含 security.protocol=SASL_SSL、sasl.mechanism、JAAS 与 truststore 配置；不要将密码写入命令行或 Git。运行创建脚本前先填齐所有环境变量：
+Tempo 不使用业务现有的 Kafka，而是在 TEMPO_NAMESPACE 中部署专用的单节点 Kafka，清单在 `manifests/kafka/`：
 
-```bash
-export KAFKA_BOOTSTRAP='<host:port>' KAFKA_TOPIC='tempo-traces' PARTITIONS=3
-export KAFKA_ADMIN_CONFIG='<受限文件路径>' KAFKA_PRINCIPAL='User:tempo'
-export CHANGE_APPROVAL_ID='<单号>' KAFKA_GROUP='<实际消费组>'
-bash scripts/kafka/create-topic.sh
-kafka-topics.sh --bootstrap-server "$KAFKA_BOOTSTRAP" --command-config "$KAFKA_ADMIN_CONFIG" --describe --topic "$KAFKA_TOPIC"
-kafka-consumer-groups.sh --bootstrap-server "$KAFKA_BOOTSTRAP" --command-config "$KAFKA_ADMIN_CONFIG" --list
-kafka-consumer-groups.sh --bootstrap-server "$KAFKA_BOOTSTRAP" --command-config "$KAFKA_ADMIN_CONFIG" --describe --group "$KAFKA_GROUP"
-```
+- **形态**：`apache/kafka:4.3.1`，KRaft 模式（broker 与 controller 在同一进程），1 个 Pod，数据在 PVC `data-tempo-kafka-0`。`CLUSTER_ID` 固定写在清单中，与 PVC 中已格式化的数据对应，不要修改。
+- **监听器**：`PLAINTEXT://:9092`（客户端）、`CONTROLLER://:9093`（仅本机）。advertised 地址是 `tempo-kafka-0.tempo-kafka-headless.<ns>.svc.cluster.local:9092`。Tempo 通过 Service `tempo-kafka:9092` 连接。
+- **安全**：集群内明文、无认证。NetworkPolicy `tempo-kafka` 只允许 Tempo Pod（`app.kubernetes.io/name=tempo`）和初始化 Job（`tempo-kafka-setup`）访问 9092；Tempo 的 NetworkPolicy 只放行到 `tempo-kafka` 的 9092 出口。
+- **broker 默认值**：`num.partitions=3`、副本数 1、`message.max.bytes=16000000`、`log.retention.hours=24`、`log.retention.bytes=28000000000`（每分区），关闭自动创建 Topic。
+- **Topic**：由 Job `tempo-kafka-create-topic` 创建 `tempo-traces`，3 分区、1 副本、`min.insync.replicas=1`、`cleanup.policy=delete`、保留 24 小时、每分区最多 28GB、`max.message.bytes=16000000`。Job 使用 `--if-not-exists`，可以重复执行。
 
-脚本遇到已有 Topic 会失败，避免悄悄接受不兼容配置。已建 Topic 仅在审阅 describe/configs 后复用，不盲目 --alter。可单独执行 `scripts/kafka/grant-acls.sh` 修复授权。固定版本源码核验的生产消费组为 `block-builder`、`metrics-generator`、`tempo-live-store-zone-a`、`tempo-live-store-zone-b`；Live Store 组名是 Pod 实例名去掉末尾 `-数字`。本脚本逐组授予 Read/Describe，不授予 `*` group 或业务 Topic 权限。更名或改 zone 时同步修改 ACL，开发单区组名为 `tempo-live-store`。Block Builder 静态分配，不能仅用 consumer-group 成员数判断是否正常；同时看 Tempo partition lag、offset 和对象落盘。
-
-max.message.bytes=16000000 为最小值；同时核验 broker message.max.bytes 与 replica.fetch.max.bytes（及请求限制）能处理该大小，检查与调整命令见 04 第 5.3 步。现有共享 broker 参数改变应独立审批。Broker 使用 delete cleanup policy，RF=3、min ISR=2、禁止不安全 leader election；评审磁盘告警和恢复余量。24h retention 不能低于未落 S3 数据最长恢复时间。
-
-认证变体：SASL PLAIN 与 SCRAM 只改机制；TLS/mTLS 在 `tempo.structuredConfig.ingest.kafka` 增加 tls_cert_path、tls_key_path 并将对应 Secret 文件挂载给所有 Kafka 客户端组件。TLS 不允许 skip verify。获批 PLAINTEXT 才能关闭 tls_enabled 并移除 CA；无 SASL 的场景使用 PLAIN 且用户名/密码同时为空，必须另建经过审核的覆盖文件，默认模板不降级认证。
-
-## MinIO
-
-管理员通过已有 `mc` alias（例如 `$MINIO_ALIAS`，本地配置受限）操作专用 bucket。先审查别名指向正确实例，不重建 MinIO。
+查看状态（在 Tempo 自己的 Kafka Pod 内执行，不涉及业务）：
 
 ```bash
-mc mb "$MINIO_ALIAS/$MINIO_BUCKET"
-mc stat "$MINIO_ALIAS/$MINIO_BUCKET"
-printf 'tempo access probe\n' > /tmp/tempo-probe.txt
-mc cp /tmp/tempo-probe.txt "$MINIO_ALIAS/$MINIO_BUCKET/_acceptance/probe.txt"
-mc cat "$MINIO_ALIAS/$MINIO_BUCKET/_acceptance/probe.txt"
-mc rm "$MINIO_ALIAS/$MINIO_BUCKET/_acceptance/probe.txt"
+kubectl -n "$TEMPO_NAMESPACE" exec tempo-kafka-0 -- /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic tempo-traces
+kubectl -n "$TEMPO_NAMESPACE" exec tempo-kafka-0 -- /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --list
+kubectl -n "$TEMPO_NAMESPACE" exec tempo-kafka-0 -- /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group metrics-generator
 ```
 
-上面 canary 必须另外用 **Tempo 账号** 重复执行，管理员成功不代表应用账号可用。最小 policy 见 `integrations/minio/policy.json`：只允许指定 bucket 的 List/GetLocation 与对象 Get/Put/Delete/Multipart 操作；不能授权其他 bucket。服务账号由平台密钥流程创建，访问密钥写入 tempo-credentials。证书检查可在获准诊断机执行 `openssl s_client -connect '<host:port>' -servername '<host>' -CAfile '<ca-file>'`，不要通过跳过证书校验解决问题。
+消费组为 `block-builder`、`metrics-generator`、`tempo-live-store`（双可用区模式为 `tempo-live-store-zone-a`、`tempo-live-store-zone-b`）。Block Builder 是静态分配，不能只看 consumer-group 成员数判断是否正常，要同时看 Tempo 的 partition lag、offset 和对象落盘。
 
-Block Builder 构建 Parquet block 到对象存储；Querier 按 block 元数据读取；Scheduler 调度 Worker 执行 compaction/retention。values 设 720h。对象存储生命周期不要先于 Tempo 删除活跃块或元数据；优先由 Tempo 管理逻辑保留。若 bucket 开启版本控制，已删除对象的非当前版本仍可能占空间，单独评审生命周期与备份保留，防止把灾备版本一并清除。MinIO HA/跨站复制、凭据备份和实际恢复演练归现有平台负责。
+**单节点的限制**：Kafka Pod 重启或节点故障期间 Tempo 无法写入，otel-gateway 最多重试 5 分钟。需要高可用时，可以把 StatefulSet 扩为 3 个 KRaft 节点（需同时修改 `KAFKA_NODE_ID`、`KAFKA_CONTROLLER_QUORUM_VOTERS` 和各副本数配置），或改用 Strimzi，这些属于单独的变更。
 
+## Tempo 专用 RustFS（tempo-rustfs）
+
+Tempo 不使用业务现有的 MinIO，而是部署专用的 RustFS（兼容 S3 的对象存储），清单在 `manifests/rustfs/`：
+
+- **形态**：`rustfs/rustfs:1.0.0`，单节点单盘，1 个 Pod，数据在 PVC `data-tempo-rustfs-0`。Service `tempo-rustfs` 提供 9000（S3 API）和 9001（控制台）。
+- **认证**：root 密钥来自 Secret `tempo-credentials` 的 `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY`。Tempo 用同一对密钥访问，这个 RustFS 只给 Tempo 使用。
+- **安全**：集群内 HTTP。NetworkPolicy `tempo-rustfs` 只允许 Tempo Pod 和初始化 Job（`tempo-rustfs-setup`）访问 9000；控制台只能通过 `kubectl port-forward` 访问。
+- **bucket**：由 Job `tempo-rustfs-create-bucket`（`amazon/aws-cli:2.37.4`）创建 `tempo-traces`，然后用 Tempo 的密钥写入、读取、删除一个测试对象。Job 可以重复执行。
+- **Tempo 配置**：`storage.trace.s3.endpoint=tempo-rustfs.<ns>.svc.cluster.local:9000`、`insecure: true`、`forcepathstyle: true`。
+
+Block Builder 把 Parquet block 写入对象存储，Querier 按 block 元数据读取，Scheduler 调度 Worker 执行 compaction 和 retention。values 中设为保留 720h，由 Tempo 管理过期删除，不要在 RustFS 上另设会提前删除对象的生命周期规则，也不要开启版本控制（否则已删除对象仍会占空间）。
+
+**单节点的限制**：RustFS 不可用期间 Block Builder 无法落盘、历史查询失败，数据暂存在 Kafka 中，恢复后追平；停机时间不能超过 Kafka 的保留时间。RustFS 的 PVC 是历史 trace 的唯一副本，需要按企业要求做卷快照或备份。
 ## Prometheus 与告警
 
 先导出现有 Helm values 和 Prometheus CR，不在本项目创建新 Prometheus：
@@ -56,7 +54,7 @@ Prometheus 的 serviceMonitorSelector/ruleSelector 必须匹配 release 标签�
 查询 `traces_spanmetrics_calls_total`、`traces_spanmetrics_latency_bucket`、`traces_service_graph_request_total`；无数据时检查 processors、实际流量、Remote Write 4xx/5xx、时钟偏差与拒收旧样本。host-info 默认不启用，只有需要主机关联且资源字段齐全时再评估，防止扩大基数。
 Exemplar 需要 Prometheus 版本支持并启用 exemplar storage、generator 发送以及 Grafana 指标源配置 exemplar trace link；缺一就不能承诺 Metrics→Trace。
 
-本仓库规则基于 Tempo v3.1.0 官方 mixin，已按 namespace 收窄。导入 `integrations/grafana/tempo-overview.json` 仪表板时选择现有 Prometheus。先在 /metrics 核验系列名、单位和 label，再验证规则不会因缺失系列静默失效。Kafka ISR/磁盘和 MinIO 节点健康使用平台现有 exporter/告警，不另装栈。阈值 5m、80% 仅起点，结合 SLO/压测修改。
+本仓库规则基于 Tempo v3.1.0 官方 mixin，已按 namespace 收窄。导入 `integrations/grafana/tempo-overview.json` 仪表板时选择现有 Prometheus。先在 /metrics 核验系列名、单位和 label，再验证规则不会因缺失系列静默失效。专用 Kafka / RustFS 目前没有部署 exporter，至少要对两个 PVC 的使用率和 `tempo-kafka-0`、`tempo-rustfs-0` 的就绪状态配置告警（kube-prometheus-stack 自带的 kubelet volume 与 kube-state-metrics 指标即可覆盖）。阈值 5m、80% 仅起点，结合 SLO/压测修改。
 
 ## Grafana 与 ELK
 

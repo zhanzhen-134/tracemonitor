@@ -8,14 +8,6 @@ global:
   - secretRef:
       name: tempo-credentials
 defaults:
-  extraVolumes:
-  - name: ca
-    secret:
-      secretName: tempo-ca
-  extraVolumeMounts:
-  - name: ca
-    mountPath: /etc/tempo/ca
-    readOnly: true
   podSecurityContext:
     seccompProfile:
       type: RuntimeDefault
@@ -30,21 +22,14 @@ tempo:
     periodSeconds: 10
     failureThreshold: 180
   structuredConfig:
-    ingest:
-      kafka:
-        sasl_mechanism: <KAFKA_SASL_MECHANISM>
-        sasl_username: ${KAFKA_USERNAME}
-        sasl_password: ${KAFKA_PASSWORD}
-        tls_enabled: true
-        tls_ca_path: /etc/tempo/ca/kafka-ca.crt
     multitenancy_enabled: false
 serviceAccount:
   create: true
   automountServiceAccountToken: false
 ingest:
   kafka:
-    address: <KAFKA_BOOTSTRAP>
-    topic: <KAFKA_TOPIC>
+    address: tempo-kafka.<TEMPO_NAMESPACE>.svc.cluster.local:9092
+    topic: tempo-traces
     auto_create_topic_enabled: false
     auto_create_topic_default_partitions: 3
 traces:
@@ -55,13 +40,12 @@ storage:
   trace:
     backend: s3
     s3:
-      endpoint: <MINIO_ENDPOINT>
-      bucket: <MINIO_BUCKET>
-      access_key: ${MINIO_ACCESS_KEY}
-      secret_key: ${MINIO_SECRET_KEY}
-      insecure: false
+      endpoint: tempo-rustfs.<TEMPO_NAMESPACE>.svc.cluster.local:9000
+      bucket: tempo-traces
+      access_key: ${RUSTFS_ACCESS_KEY}
+      secret_key: ${RUSTFS_SECRET_KEY}
+      insecure: true
       forcepathstyle: true
-      tls_ca_path: /etc/tempo/ca/minio-ca.crt
 metricsGenerator:
   enabled: true
   kind: StatefulSet

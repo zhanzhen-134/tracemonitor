@@ -5,7 +5,8 @@
 - `charts/tempo/`：固定版本原始 Helm 包、生产 values、开发覆盖配置、版本与 SHA256。
 - `manifests/tempo/`、`manifests/otel-gateway/`、`manifests/python-otel-demo/`：按项目组织的 Kubernetes 清单。
 - `charts/otel-operator/`、`manifests/otel-instrumentation/`：OpenTelemetry Operator values 与 Java 自动注入 Instrumentation，用于现有 Java 业务免改代码接入。
-- `scripts/tempo/`、`scripts/kafka/`：参数渲染、预检、安装、验收、回滚及外部 Topic 创建脚本。
+- `scripts/tempo/`：参数渲染、预检、安装、验收、回滚脚本。
+- `manifests/kafka/`、`manifests/rustfs/`：Tempo 专用的单节点 Kafka 与 RustFS 对象存储，以及创建 Topic / bucket 的初始化 Job，不使用业务现有的 Kafka / MinIO。
 - `integrations/`：现有 Grafana、Prometheus、ELK 的增量配置，不部署这些平台。
 - `docs/tempo/`：架构、前置条件、容量、部署、集成、验收与运维。
 
@@ -22,7 +23,7 @@ export TEMPO_NAMESPACE='<与参数文件一致>'
 bash scripts/tempo/preflight-check.sh
 ```
 
-默认生产示例：3 个 Kafka 分区、单可用区 3 个 Live Store（填写 ZONE_A / ZONE_B 时为双可用区 6 个）、3 个 Block Builder；资源与 30 天保留期均为待压测假设。应用到 Collector 使用 mTLS，Collector 到 Tempo 及 Tempo 内部 RPC 使用受 NetworkPolicy 限制的集群明文通道，需按安全基线评审；需要全链路加密时先配置已有 service mesh 或 Tempo RPC TLS 再上线。
+默认生产示例：专用单节点 Kafka（3 个分区）与 RustFS、单可用区 3 个 Live Store（填写 ZONE_A / ZONE_B 时为双可用区 6 个）、3 个 Block Builder；资源与 30 天保留期均为待压测假设。应用到 Collector 使用 mTLS，Collector 到 Tempo 及 Tempo 内部 RPC 使用受 NetworkPolicy 限制的集群明文通道，需按安全基线评审；需要全链路加密时先配置已有 service mesh 或 Tempo RPC TLS 再上线。
 
 双可用区模式（`charts/tempo/values-multi-zone.yaml`）启用 rollout-operator，增加 CRD、RBAC 和 admission webhook；这是跨区滚动更新及驱逐保护所需的额外组件，单可用区模式不安装。复用现有实例时按前置条件调整，不能重复安装。Backend Scheduler 保持单实例并使用 PVC，不承诺所有组件无中断。
 
