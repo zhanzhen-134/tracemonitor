@@ -1,0 +1,30 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tempo-rustfs-console
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: tempo-rustfs
+  annotations:
+    # Same settings as the official RustFS chart: unlimited upload size and cookie affinity.
+    nginx.ingress.kubernetes.io/proxy-body-size: '0'
+    nginx.ingress.kubernetes.io/affinity: cookie
+    nginx.ingress.kubernetes.io/session-cookie-name: rustfs
+    nginx.ingress.kubernetes.io/session-cookie-max-age: '3600'
+spec:
+  tls:
+  - hosts:
+    - monitor.wintech-nano.com
+    secretName: wintech-nano-com-cert
+  ingressClassName: nginx
+  rules:
+  - host: rustfs.wintech-nano.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: tempo-rustfs
+            port:
+              name: console

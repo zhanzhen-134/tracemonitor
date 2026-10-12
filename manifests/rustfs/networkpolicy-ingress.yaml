@@ -1,0 +1,30 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tempo-rustfs-console
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: tempo-rustfs
+spec:
+  # ingress-nginx 运行在 hostNetwork 模式（node-106 / node-107）。访问同一节点上的 Pod 时，
+  # 来源是节点 IP；访问其他节点上的 Pod 时，来源是该节点的 Calico VXLAN 隧道地址。
+  # 两者都要放行，且只放行控制台端口 9001。
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: tempo-rustfs
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - ipBlock:
+        cidr: 10.10.30.106/32       # node-106 节点 IP
+    - ipBlock:
+        cidr: 10.10.30.107/32       # node-107 节点 IP
+    - ipBlock:
+        cidr: 11.244.78.95/32       # node-106 的 VXLAN 隧道地址
+    - ipBlock:
+        cidr: 11.244.110.245/32     # node-107 的 VXLAN 隧道地址
+    ports:
+    - protocol: TCP
+      port: 9001
+

@@ -1,13 +1,13 @@
 manager:
   image:
-    repository: ghcr.io/open-telemetry/opentelemetry-operator/opentelemetry-operator
+    repository: harbor.wintech-nano.com/external/open-telemetry/opentelemetry-operator/opentelemetry-operator
     tag: 0.135.0
   collectorImage:
-    repository: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-k8s
+    repository: harbor.wintech-nano.com/external/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-k8s
     tag: 0.135.0
   autoInstrumentationImage:
     java:
-      repository: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-java
+      repository: harbor.wintech-nano.com/external/open-telemetry/opentelemetry-operator/autoinstrumentation-java
       tag: 1.33.6
   resources:
     requests:
