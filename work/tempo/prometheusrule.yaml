@@ -1,0 +1,475 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: tempo
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+  - name: tempo_alerts
+    rules:
+    - alert: TempoDistributorUnhealthy
+      annotations:
+        message: There are {{ printf "%f" $value }} unhealthy distributor(s).
+        runbook_url: https://github.com/grafana/tempo/tree/main/operations/tempo-mixin/runbook.md#TempoDistributorUnhealthy
+      expr: 'max by (cluster, namespace) (tempo_ring_members{state="Unhealthy", name="distributor",
+        namespace="monitoring"}) > 0
+
+        '
+      for: 15m
+      labels:
+        severity: warning
+    - alert: TempoLiveStoreUnhealthy
+      annotations:
+        message: There are {{ printf "%f" $value }} unhealthy livestore(s).
+        runbook_url: https://github.com/grafana/tempo/tree/main/operations/tempo-mixin/runbook.md#TempoLiveStoreUnhealthy
+      expr: 'max by (cluster, namespace) (tempo_ring_members{state="Unhealthy", name="live-store",
+        namespace="monitoring"}) > 0
+
+        '
+      for: 15m
+      labels:
+        severity: critical
+    - alert: TempoMetricsGeneratorUnhealthy
+      annotations:
+        message: There are {{ printf "%f" $value }} unhealthy metric-generator(s).
+        runbook_url: https://github.com/grafana/tempo/tree/main/operations/tempo-mixin/runbook.md#TempoMetricsGeneratorUnhealthy
+      expr: 'max by (cluster, namespace) (tempo_ring_members{state="Unhealthy", name="metrics-generator",
+        namespace="monitoring"}) > 0
+
+        '
+      for: 15m
+      labels:
+        severity: critical
+    - alert: TempoCompactionsFailing
+      annotations:
+        message: Greater than 2 compactions have failed in the past hour.
+        runbook_url: https://github.com/grafana/tempo/tree/main/operations/tempo-mixin/runbook.md#TempoCompactionsFailing
+      expr: 'sum by (cluster, namespace) (increase(tempodb_compaction_errors_total{namespace="monitoring"}[1h]))
+        > 2 and
+
+        sum by (cluster, namespace) (increase(tempodb_compaction_errors_total{namespace="monitoring"}[5m]))
+        > 0
+
+        '
+      for: 1h
+      labels:
+        severity: critical
+    - alert: TempoPollsFailing
+      annotations:
+        message: Greater than 2 polls have failed in the past hour.
+        runbook_url: https://github.com/grafana/tempo/tree/main/operations/tempo-mixin/runbook.md#TempoPollsFailing
+      expr: 'sum by (cluster, namespace) (increase(tempodb_blocklist_poll_errors_total{namespace="monitoring"}[1h]))
+        > 2 and
+
+        sum by (cluster, namespace) (increase(tempodb_blocklist_poll_errors_total{namespace="monitoring"}[5m]))
+        > 0
+
+        '
+      labels:
+        severity: critical
+    - alert: TempoTenantIndexFailures
+      annotations:
+        message: Greater than 2 tenant index failures in the past hour.
+        runbook_url: https://github.com/grafana/tempo/tree/main/operations/tempo-mixin/runbook.md#TempoTenantIndexFailures
+      expr: 'sum by (cluster, namespace) (increase(tempodb_blocklist_tenant_index_errors_total{namespace="monitoring"}[1h]))
+        > 2 and
+
+        sum by (cluster, namespace) (increase(tempodb_blocklist_tenant_index_errors_total{namespace="monitoring"}[5m]))
+        > 0
+
+        '
+      labels:
+        severity: critical
+    - alert: TempoNoTenantIndexBuilders
+      annotations:
+        message: No tenant index builders for tenant {{ $labels.tenant }}. Tenant
+          index will quickly become stale.
+        runbook_url: https://github.com/grafana/tempo/tree/main/operations/tempo-mixin/runbook.md#TempoNoTenantIndexBuilders
+      expr: 'sum by (cluster, namespace, tenant) (tempodb_blocklist_tenant_index_builder{namespace="monitoring"})
+        == 0 and
+
+        max by (cluster, namespace) (tempodb_blocklist_length{namespace="monitoring"})
+        > 0
+
+        '
+      for: 5m
+      labels:
+        severity: critical
+    - alert: TempoTenantIndexTooOld
+      annotations:
+        message: Tenant index age is 600 seconds old for tenant {{ $labels.tenant
+          }}.
+        runbook_url: https://github.com/grafana/tempo/tree/main/operations/tempo-mixin/runbook.md#TempoTenantIndexTooOld
+      expr: 'max by (cluster, namespace, tenant) (tempodb_blocklist_tenant_index_age_seconds{namespace="monitoring"})
+        > 600
+
+        '
+      for: 5m
+      labels:
+        severity: critical
+    - alert: TempoBadOverrides
+      annotations:
+        message: '{{ $labels.job }} failed to reload overrides.'
+        runbook_url: https://github.com/grafana/tempo/tree/main/operations/tempo-mixin/runbook.md#TempoBadOverrides
+      expr: 'sum(tempo_runtime_config_last_reload_successful{namespace="monitoring"}
+        == 0) by (cluster, namespace, job)
+
+        '
+      for: 15m
+      labels:
+        severity: critical
+    - alert: TempoCompactionTooManyOutstandingBlocks
+      annotations:
+        message: There are too many outstanding compaction blocks in {{ $labels.cluster
+          }}/{{ $labels.namespace }} for tenant {{ $labels.tenant }}, increase backend-worker
+          CPU or add more backend-workers.
+        runbook_url: https://github.com/grafana/tempo/tree/main/operations/tempo-mixin/runbook.md#TempoCompactionTooManyOutstandingBlocks
+      expr: 'sum by (cluster, namespace, tenant) (tempodb_compaction_outstanding_blocks{container="backend-scheduler",
+        namespace="monitoring"}) / ignoring(tenant) group_left count(tempo_build_info{container="backend-worker",
+        namespace="monitoring"}) by (cluster, namespace) > 100
+
+        '
+      for: 6h
+      labels:
+        severity: warning
+    - alert: TempoCompactionTooManyOutstandingBlocks
+      annotations:
+        message: There are too many outstanding compaction blocks in {{ $labels.cluster
+          }}/{{ $labels.namespace }} for tenant {{ $labels.tenant }}, increase backend-worker
+          CPU or add more backend-workers.
+        runbook_url: https://github.com/grafana/tempo/tree/main/operations/tempo-mixin/runbook.md#TempoCompactionTooManyOutstandingBlocks
+      expr: 'sum by (cluster, namespace, tenant) (tempodb_compaction_outstanding_blocks{container="backend-scheduler",
+        namespace="monitoring"}) / ignoring(tenant) group_left count(tempo_build_info{container="backend-worker",
+        namespace="monitoring"}) by (cluster, namespace) > 250
+
+        '
+      for: 24h
+      labels:
+        severity: critical
+    - alert: TempoMetricsGeneratorPartitionLagCritical
+      annotations:
+        message: Tempo partition {{ $labels.partition }} is lagging by more than 900
+          seconds in {{ $labels.cluster }}/{{ $labels.namespace }}.
+        runbook_url: https://github.com/grafana/tempo/tree/main/operations/tempo-mixin/runbook.md#TempoPartitionLag
+      expr: 'max by (cluster, namespace, partition) (tempo_ingest_group_partition_lag_seconds{namespace="monitoring",
+        container="metrics-generator"}) > 900
+
+        '
+      for: 5m
+      labels:
+        severity: critical
+    - alert: TempoBlockBuilderPartitionLagWarning
+      annotations:
+        message: Tempo ingest partition {{ $labels.partition }} for blockbuilder is
+          lagging by more than 300 seconds in {{ $labels.cluster }}/{{ $labels.namespace
+          }}.
+        runbook_url: https://github.com/grafana/tempo/tree/main/operations/tempo-mixin/runbook.md#TempoPartitionLag
+      expr: 'max by (cluster, namespace, partition) (avg_over_time(tempo_ingest_group_partition_lag_seconds{namespace="monitoring",
+        container="block-builder"}[6m])) > 200
+
+        '
+      for: 5m
+      labels:
+        severity: warning
+    - alert: TempoBlockBuilderPartitionLagCritical
+      annotations:
+        message: Tempo ingest partition {{ $labels.partition }} for blockbuilder is
+          lagging by more than 300 seconds in {{ $labels.cluster }}/{{ $labels.namespace
+          }}.
+        runbook_url: https://github.com/grafana/tempo/tree/main/operations/tempo-mixin/runbook.md#TempoPartitionLag
+      expr: 'max by (cluster, namespace, partition) (avg_over_time(tempo_ingest_group_partition_lag_seconds{namespace="monitoring",
+        container=~"block-builder"}[6m])) > 300
+
+        '
+      for: 5m
+      labels:
+        severity: critical
+    - alert: TempoLiveStorePartitionLagWarning
+      annotations:
+        message: 'Tempo ingest partition {{ $labels.partition }} for live store {{
+          $labels.group }} is lagging by {{ $value | humanizeDuration }} (threshold:
+          200s) in {{ $labels.cluster }}/{{ $labels.namespace }}.'
+        runbook_url: https://github.com/grafana/tempo/tree/main/operations/tempo-mixin/runbook.md#TempoPartitionLag
+      expr: 'max by (cluster, namespace, partition, group) (avg_over_time(tempo_ingest_group_partition_lag_seconds{namespace="monitoring",
+        container="live-store"}[6m])) > 200
+
+        '
+      for: 5m
+      labels:
+        severity: warning
+    - alert: TempoLiveStoreSingleMemberLagHigh
+      annotations:
+        message: 'A single Tempo live-store owner of partition {{ $labels.partition
+          }} (group {{ $labels.group }}) is lagging by {{ $value | humanizeDuration
+          }} (threshold: 1200s) in {{ $labels.cluster }}/{{ $labels.namespace }}.'
+        runbook_url: https://github.com/grafana/tempo/tree/main/operations/tempo-mixin/runbook.md#TempoLiveStoreSingleMemberLagHigh
+      expr: 'max by (cluster, namespace, partition, group) (avg_over_time(tempo_ingest_group_partition_lag_seconds{namespace="monitoring",
+        container=~"live-store"}[6m])) > 1200
+
+        '
+      for: 5m
+      labels:
+        severity: critical
+    - alert: TempoLiveStoreAllMembersLagging
+      annotations:
+        message: All owners of Tempo live-store partition {{ $labels.partition }}
+          are lagging by {{ $value | humanizeDuration }} in {{ $labels.cluster }}/{{
+          $labels.namespace }}. This is a partial read outage.
+        runbook_url: https://github.com/grafana/tempo/tree/main/operations/tempo-mixin/runbook.md#TempoLiveStoreAllMembersLagging
+      expr: 'min by (cluster, namespace, partition) (avg_over_time(tempo_ingest_group_partition_lag_seconds{namespace="monitoring",
+        container=~"live-store"}[6m])) > 300
+
+        '
+      for: 2m
+      labels:
+        severity: critical
+    - alert: TempoBackendSchedulerJobsFailureRateHigh
+      annotations:
+        message: Tempo backend scheduler job failure rate is {{ printf "%0.2f" $value
+          }} (threshold 0.1) in {{ $labels.cluster }}/{{ $labels.namespace }}
+        runbook_url: https://github.com/grafana/tempo/tree/main/operations/tempo-mixin/runbook.md#TempoBackendSchedulerJobsFailureRateHigh
+      expr: 'sum(increase(tempo_backend_scheduler_jobs_failed_total{namespace="monitoring"}[5m]))
+        by (cluster, namespace)
+
+        /
+
+        sum(increase(tempo_backend_scheduler_jobs_created_total{namespace="monitoring"}[5m]))
+        by (cluster, namespace)
+
+        > 0.05
+
+        '
+      for: 10m
+      labels:
+        severity: critical
+    - alert: TempoBackendSchedulerRetryRateHigh
+      annotations:
+        message: Tempo backend scheduler retry rate is high ({{ printf "%0.2f" $value
+          }} retries/minute) in {{ $labels.cluster }}/{{ $labels.namespace }}
+        runbook_url: https://github.com/grafana/tempo/tree/main/operations/tempo-mixin/runbook.md#TempoBackendSchedulerRetryRateHigh
+      expr: 'sum(increase(tempo_backend_scheduler_jobs_retry_total{namespace="monitoring"}[1m]))
+        by (cluster, namespace) > 20
+
+        '
+      for: 10m
+      labels:
+        severity: warning
+    - alert: TempoBackendSchedulerCompactionEmptyJobRateHigh
+      annotations:
+        message: Tempo backend scheduler empty job rate is high ({{ printf "%0.2f"
+          $value }} jobs/minute) in {{ $labels.cluster }}/{{ $labels.namespace }}
+        runbook_url: https://github.com/grafana/tempo/tree/main/operations/tempo-mixin/runbook.md#TempoBackendSchedulerCompactionEmptyJobRateHigh
+      expr: 'sum(increase(tempo_backend_scheduler_compaction_tenant_empty_job_total{namespace="monitoring"}[1m]))
+        by (cluster, namespace) > 10
+
+        '
+      for: 10m
+      labels:
+        severity: warning
+    - alert: TempoBackendWorkerBadJobsRateHigh
+      annotations:
+        message: Tempo backend worker bad jobs rate is high ({{ printf "%0.2f" $value
+          }} bad jobs/minute) in {{ $labels.cluster }}/{{ $labels.namespace }}
+        runbook_url: https://github.com/grafana/tempo/tree/main/operations/tempo-mixin/runbook.md#TempoBackendWorkerBadJobsRateHigh
+      expr: 'sum(increase(tempo_backend_worker_bad_jobs_received_total{namespace="monitoring"}[1m]))
+        by (cluster, namespace) > 0
+
+        '
+      for: 10m
+      labels:
+        severity: warning
+    - alert: TempoBackendWorkerCallRetriesHigh
+      annotations:
+        message: Tempo backend worker call retries rate is high ({{ printf "%0.2f"
+          $value }} retries/minute) in {{ $labels.cluster }}/{{ $labels.namespace
+          }}
+        runbook_url: https://github.com/grafana/tempo/tree/main/operations/tempo-mixin/runbook.md#TempoBackendWorkerCallRetriesHigh
+      expr: 'sum(increase(tempo_backend_worker_call_retries_total{namespace="monitoring"}[1m]))
+        by (cluster, namespace) > 5
+
+        '
+      for: 10m
+      labels:
+        severity: warning
+    - alert: TempoBlockBuildersPartitionsMismatch
+      annotations:
+        message: Tempo block-builder partitions mismatch in {{ $labels.cluster }}/{{
+          $labels.namespace }}.
+        runbook_url: https://github.com/grafana/tempo/tree/main/operations/tempo-mixin/runbook.md#TempoBlockBuildersPartitionsMismatch
+      expr: 'max(tempo_partition_ring_partitions{namespace="monitoring",name=~"livestore-partitions",
+        state=~"Active|Inactive"}) by (namespace,cluster)
+
+        >
+
+        sum(tempo_block_builder_owned_partitions{namespace="monitoring"}) by(namespace,cluster)
+
+        '
+      for: 10m
+      labels:
+        severity: critical
+    - alert: TempoLiveStoresPartitionsUnowned
+      annotations:
+        message: Some live-store partitions are unowned in {{ $labels.cluster }}/{{
+          $labels.namespace }}.
+        runbook_url: https://github.com/grafana/tempo/tree/main/operations/tempo-mixin/runbook.md#TempoLiveStoresPartitionsUnowned
+      expr: "max by(namespace, cluster) (\n  tempo_partition_ring_partitions{namespace=\"\
+        monitoring\",name=~\"livestore-partitions\", state=~\"Active|Inactive\"\
+        }\n)\n>\ncount(count by (partition,namespace,cluster) (\n  tempo_live_store_partition_owned{namespace=\"\
+        monitoring\"}\n)) by (namespace, cluster)\n"
+      for: 10m
+      labels:
+        severity: critical
+    - alert: TempoLiveStoreZoneSeverelyDegraded
+      annotations:
+        message: Live-store zone {{ $labels.zone }} owns far fewer partitions than
+          peers in {{ $labels.cluster }}/{{ $labels.namespace }}.
+        runbook_url: https://github.com/grafana/tempo/tree/main/operations/tempo-mixin/runbook.md#TempoLiveStoreZoneSeverelyDegraded
+      expr: "abs(\n  (\n    count by (namespace, cluster, zone) (tempo_live_store_partition_owned{namespace=\"\
+        monitoring\"})\n    /\n    on(namespace, cluster)\n    group_left()\n\
+        \    max by (namespace, cluster) (count by (namespace, cluster, zone) (tempo_live_store_partition_owned{namespace=\"\
+        monitoring\"}))\n   ) - 1\n ) > 0.6\n"
+      for: 10m
+      labels:
+        severity: critical
+    - alert: TempoDistributorKafkaProduceFailing
+      annotations:
+        message: '{{ $value | humanizePercentage }} of distributor -> Kafka record
+          produces are failing in {{ $labels.cluster }}/{{ $labels.namespace }}.'
+        runbook_url: https://github.com/grafana/tempo/tree/main/operations/tempo-mixin/runbook.md#TempoDistributorKafkaProduceFailing
+      expr: 'sum by (cluster, namespace) (rate(tempo_distributor_produce_failures_total{namespace="monitoring",
+        reason!="cancelled-before-producing"}[5m]))
+
+        /
+
+        sum by (cluster, namespace) (rate(tempo_distributor_produce_records_total{namespace="monitoring"}[5m]))
+
+        > 0.001
+
+        and
+
+        sum by (cluster, namespace) (rate(tempo_distributor_produce_records_total{namespace="monitoring"}[5m]))
+        > 0
+
+        '
+      for: 5m
+      labels:
+        severity: critical
+    - alert: TempoMetricsGeneratorProcessorUpdatesFailing
+      annotations:
+        message: Metrics-generator processor updates are failing for tenant {{ $labels.tenant
+          }} in {{ $labels.cluster }}/{{ $labels.namespace }}.
+        runbook_url: https://github.com/grafana/tempo/tree/main/operations/tempo-mixin/runbook.md#TempoMetricsGeneratorProcessorUpdatesFailing
+      expr: "sum by (cluster, namespace, tenant) (\n  increase(tempo_metrics_generator_active_processors_update_failed_total{namespace=\"\
+        monitoring\"}[5m])\n) > 0\n"
+      for: 15m
+      labels:
+        severity: critical
+    - alert: TempoMetricsGeneratorServiceGraphsDroppingSpans
+      annotations:
+        message: Metrics-generator service-graphs processor is dropping {{ $value
+          | humanizePercentage }} spans for tenant {{ $labels.tenant }} in {{ $labels.cluster
+          }}/{{ $labels.namespace }}.
+        runbook_url: https://github.com/grafana/tempo/tree/main/operations/tempo-mixin/runbook.md#TempoMetricsGeneratorServiceGraphsDroppingSpans
+      expr: 'sum by (cluster, namespace, tenant) (increase(tempo_metrics_generator_processor_service_graphs_dropped_spans{namespace="monitoring"}[1h]))
+
+        /
+
+        sum by (cluster, namespace, tenant) (increase(tempo_metrics_generator_spans_received_total{namespace="monitoring"}[1h]))
+
+        > 0.005
+
+        '
+      for: 15m
+      labels:
+        severity: warning
+    - alert: TempoMetricsGeneratorCollectionsFailing
+      annotations:
+        message: Metrics-generator collections are failing for tenant {{ $labels.tenant
+          }} in {{ $labels.cluster }}/{{ $labels.namespace }}.
+        runbook_url: https://github.com/grafana/tempo/tree/main/operations/tempo-mixin/runbook.md#TempoMetricsGeneratorCollectionsFailing
+      expr: 'sum by (cluster, namespace, tenant, pod, job) (increase(tempo_metrics_generator_registry_collections_failed_total{namespace="monitoring"}[5m]))
+        > 2
+
+        '
+      for: 5m
+      labels:
+        severity: critical
+  - name: otel_gateway
+    rules:
+    - alert: OtelExportFailed
+      expr: sum(rate(otelcol_exporter_send_failed_spans_total{namespace="monitoring"}[5m]))
+        > 0
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: Collector export retries are failing; inspect queue and Tempo connectivity
+    - alert: OtelQueueHigh
+      expr: otelcol_exporter_queue_size{namespace="monitoring"} / otelcol_exporter_queue_capacity{namespace="monitoring"}
+        > 0.8
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: Collector queue exceeds 80%
+    - alert: TracingPodRestart
+      expr: increase(kube_pod_container_status_restarts_total{namespace="monitoring"}[15m])
+        > 3
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: Tracing container restarted repeatedly
+    - alert: TracingTargetDown
+      expr: up{namespace="monitoring"} == 0
+      for: 5m
+      labels:
+        severity: critical
+      annotations:
+        summary: Tracing scrape target is down
+    - alert: OtelRefusedSpans
+      expr: sum(rate(otelcol_receiver_refused_spans_total{namespace="monitoring"}[5m]))
+        > 0
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: Collector refuses spans; check memory and receiver errors
+    - alert: TracingOOM
+      expr: kube_pod_container_status_last_terminated_reason{namespace="monitoring",reason="OOMKilled"}
+        == 1
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: Tracing pod last termination was OOM; correlate with restart timestamp
+    - alert: TempoQueryErrors
+      expr: sum(rate(tempo_request_duration_seconds_count{namespace="monitoring",container="query-frontend",route=~"api_.*",status_code=~"5.."}[5m])) / clamp_min(sum(rate(tempo_request_duration_seconds_count{namespace="monitoring",container="query-frontend",route=~"api_.*"}[5m])), 0.001) > 0.01
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: Query frontend HTTP 5xx ratio exceeds 1 percent
+    - alert: TempoQueryLatency
+      expr: histogram_quantile(0.95, sum by (le) (rate(tempo_request_duration_seconds_bucket{namespace="monitoring",container="query-frontend",route=~"api_.*"}[5m]))) > 5
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: Query frontend p95 exceeds 5 seconds; calibrate against query SLO
+    - alert: TempoRemoteWriteFailures
+      expr: sum(rate(prometheus_remote_storage_failed_samples_total{namespace="monitoring",container="metrics-generator"}[5m]) or rate(prometheus_remote_storage_samples_failed_total{namespace="monitoring",container="metrics-generator"}[5m])) > 0
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: Metrics generator remote write loses samples; inspect receiver and WAL
+    - alert: TempoMetricsMissing
+      expr: absent(up{namespace="monitoring",service="tempo-distributor"})
+      for: 10m
+      labels:
+        severity: critical
+      annotations:
+        summary: Distributor monitoring target is missing; verify ServiceMonitor selectors

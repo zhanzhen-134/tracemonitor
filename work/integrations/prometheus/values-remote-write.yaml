@@ -1,0 +1,3 @@
+prometheus:
+  prometheusSpec:
+    enableRemoteWriteReceiver: true

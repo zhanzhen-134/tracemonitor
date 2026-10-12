@@ -1,0 +1,133 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: tempo-kafka
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: tempo-kafka
+spec:
+  serviceName: tempo-kafka-headless
+  replicas: 1
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tempo-kafka
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tempo-kafka
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: kafka
+        image: harbor.wintech-nano.com/external/apache/kafka:4.3.1
+        ports:
+        - name: client
+          containerPort: 9092
+        - name: controller
+          containerPort: 9093
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        # Single-node KRaft (broker + controller in one process). CLUSTER_ID is fixed so the
+        # storage formatted on the PVC keeps matching after restarts.
+        - name: CLUSTER_ID
+          value: 84yQaUwgCYnfuqj6-utpbg
+        - name: KAFKA_NODE_ID
+          value: '1'
+        - name: KAFKA_PROCESS_ROLES
+          value: broker,controller
+        - name: KAFKA_LISTENERS
+          value: PLAINTEXT://:9092,CONTROLLER://:9093
+        - name: KAFKA_ADVERTISED_LISTENERS
+          value: PLAINTEXT://$(POD_NAME).tempo-kafka-headless.monitoring.svc.cluster.local:9092
+        - name: KAFKA_CONTROLLER_LISTENER_NAMES
+          value: CONTROLLER
+        - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+          value: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+        - name: KAFKA_INTER_BROKER_LISTENER_NAME
+          value: PLAINTEXT
+        - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+          value: 1@localhost:9093
+        - name: KAFKA_LOG_DIRS
+          value: /var/lib/kafka/data/logs
+        - name: KAFKA_NUM_PARTITIONS
+          value: '3'
+        - name: KAFKA_DEFAULT_REPLICATION_FACTOR
+          value: '1'
+        - name: KAFKA_MIN_INSYNC_REPLICAS
+          value: '1'
+        - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+          value: '1'
+        - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+          value: '1'
+        - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+          value: '1'
+        - name: KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR
+          value: '1'
+        - name: KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR
+          value: '1'
+        - name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS
+          value: '0'
+        - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+          value: 'false'
+        - name: KAFKA_MESSAGE_MAX_BYTES
+          value: '16000000'
+        # 24h retention, capped at 28GB per partition (3 partitions ~= 84GB) to fit the PVC.
+        # Change together with KAFKA_STORAGE_SIZE.
+        - name: KAFKA_LOG_RETENTION_HOURS
+          value: '24'
+        - name: KAFKA_LOG_RETENTION_BYTES
+          value: '28000000000'
+        - name: KAFKA_HEAP_OPTS
+          value: -Xms1g -Xmx1g
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 500m
+            memory: 2Gi
+          limits:
+            cpu: '2'
+            memory: 3Gi
+        startupProbe:
+          tcpSocket:
+            port: client
+          periodSeconds: 10
+          failureThreshold: 60
+        readinessProbe:
+          tcpSocket:
+            port: client
+          periodSeconds: 10
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket:
+            port: controller
+          periodSeconds: 20
+          failureThreshold: 6
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/kafka/data
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      storageClassName: local-path
+      resources:
+        requests:
+          storage: 100Gi

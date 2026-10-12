@@ -1,0 +1,75 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tempo-rustfs-create-bucket
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: tempo-rustfs-setup
+spec:
+  backoffLimit: 10
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tempo-rustfs-setup
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: create-bucket
+        image: harbor.wintech-nano.com/external/amazon/aws-cli:2.37.4
+        command:
+        - /bin/bash
+        - -ec
+        - |
+          E=http://tempo-rustfs.monitoring.svc.cluster.local:9000
+          aws configure set default.s3.addressing_style path
+          if aws --endpoint-url "$E" s3api head-bucket --bucket tempo-traces 2>/dev/null; then
+            echo 'bucket tempo-traces already exists'
+          else
+            aws --endpoint-url "$E" s3api create-bucket --bucket tempo-traces
+          fi
+          # Canary: write, read back and delete one object with the credentials Tempo will use.
+          echo tempo-probe > /tmp/probe.txt
+          aws --endpoint-url "$E" s3 cp /tmp/probe.txt s3://tempo-traces/_acceptance/probe.txt
+          aws --endpoint-url "$E" s3 cp s3://tempo-traces/_acceptance/probe.txt /tmp/probe-read.txt
+          [ "$(cat /tmp/probe.txt)" = "$(cat /tmp/probe-read.txt)" ]
+          aws --endpoint-url "$E" s3 rm s3://tempo-traces/_acceptance/probe.txt
+          echo 'bucket tempo-traces ready: PUT/GET/DELETE ok'
+        env:
+        - name: HOME
+          value: /tmp
+        - name: AWS_DEFAULT_REGION
+          value: us-east-1
+        - name: AWS_REQUEST_CHECKSUM_CALCULATION
+          value: when_required
+        - name: AWS_RESPONSE_CHECKSUM_VALIDATION
+          value: when_required
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: tempo-credentials
+              key: RUSTFS_ACCESS_KEY
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: tempo-credentials
+              key: RUSTFS_SECRET_KEY
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi

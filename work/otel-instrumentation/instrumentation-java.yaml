@@ -1,0 +1,30 @@
+apiVersion: opentelemetry.io/v1alpha1
+kind: Instrumentation
+metadata:
+  name: java
+  namespace: monitoring
+spec:
+  exporter:
+    endpoint: http://otel-gateway.monitoring.svc.cluster.local:4319
+  propagators:
+  - tracecontext
+  - baggage
+  sampler:
+    type: parentbased_traceidratio
+    argument: '0.2'
+  java:
+    image: harbor.wintech-nano.com/external/open-telemetry/opentelemetry-operator/autoinstrumentation-java:1.33.6
+    env:
+    - name: OTEL_EXPORTER_OTLP_PROTOCOL
+      value: http/protobuf
+    - name: OTEL_METRICS_EXPORTER
+      value: none
+    - name: OTEL_LOGS_EXPORTER
+      value: none
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 500m
+        memory: 128Mi

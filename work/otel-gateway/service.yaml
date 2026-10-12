@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-gateway
+  namespace: monitoring
+  labels: &id001
+    app.kubernetes.io/name: otel-gateway
+spec:
+  selector: *id001
+  ports:
+  - name: otlp-grpc
+    port: 4317
+    targetPort: otlp-grpc
+  - name: otlp-http
+    port: 4318
+    targetPort: otlp-http
+  - name: otlp-http-plain
+    port: 4319
+    targetPort: otlp-http-plain
+  - name: metrics
+    port: 8888
+    targetPort: metrics

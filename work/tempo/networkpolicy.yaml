@@ -1,0 +1,97 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tempo
+  namespace: monitoring
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: tempo
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - &id001
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: tempo
+    ports:
+    - protocol: TCP
+      port: 9095
+    - protocol: TCP
+      port: 3200
+    - protocol: TCP
+      port: 7946
+    - protocol: UDP
+      port: 7946
+  - from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: otel-gateway
+    ports:
+    - protocol: TCP
+      port: 4317
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+    ports:
+    - protocol: TCP
+      port: 3200
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+    ports:
+    - protocol: TCP
+      port: 3200
+  - from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: rollout-operator
+    ports:
+    - protocol: TCP
+      port: 3200
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  - to:
+    - *id001
+    ports:
+    - protocol: TCP
+      port: 9095
+    - protocol: TCP
+      port: 3200
+    - protocol: TCP
+      port: 7946
+    - protocol: UDP
+      port: 7946
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: tempo-kafka
+    ports:
+    - protocol: TCP
+      port: 9092
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: tempo-rustfs
+    ports:
+    - protocol: TCP
+      port: 9000
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+    ports:
+    - protocol: TCP
+      port: 9090
